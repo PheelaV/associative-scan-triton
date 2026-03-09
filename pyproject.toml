@@ -17,6 +17,9 @@ requires = ["uv_build>=0.9.9,<0.10.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
+bench = [
+    "accelerated-scan>=0.3.1",
+]
 dev = [
     "jax>=0.6.2",
     "numpy>=2.2.6",

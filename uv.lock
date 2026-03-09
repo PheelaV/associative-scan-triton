@@ -9,6 +9,18 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "accelerated-scan"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/78/f6a8ea3be54e0272388ac089d7819dbd1c4f47c7d0026d9e92278c775dcd/accelerated_scan-0.3.1.tar.gz", hash = "sha256:cb1f38993e5c81f52ecc3ed4b8060ab8ee7292beacc818f173b22341331c9c9e", size = 77418, upload-time = "2026-01-07T07:35:39.858Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/89/cc53b59d0a6cd6ba1d2270764121c7b1ab66c5553ecbe445adb6f872435e/accelerated_scan-0.3.1-py3-none-any.whl", hash = "sha256:81676a54162bb7b522bbf9eee3a093b18c327be92f3f4c82aab3bc3d6372ec97", size = 13822, upload-time = "2026-01-07T07:35:38.69Z" },
+]
+
+[[package]]
 name = "associative-scan-triton"
 version = "0.1.0"
 source = { editable = "." }
@@ -18,6 +30,9 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+bench = [
+    { name = "accelerated-scan" },
+]
 dev = [
     { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "jax", version = "0.9.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -34,6 +49,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+bench = [{ name = "accelerated-scan", specifier = ">=0.3.1" }]
 dev = [
     { name = "jax", specifier = ">=0.6.2" },
     { name = "numpy", specifier = ">=2.2.6" },

@@ -73,6 +73,20 @@ Requires PyTorch >= 2.10 and Triton >= 3.6 (ships with recent PyTorch).
 | `scan_eager.py` | `scan_causal`, `scan_bidirectional_branched` — autograd-compatible |
 | `scan_compiled.py` | `scan_bidirectional_branched_compiled` — `torch.compile`-compatible via `@triton_op` |
 
+## performance
+
+Scan kernel forward pass on H100 80GB, config `(B=8, C=1536, seqlen)`, inference mode. Compared against [accelerated-scan](https://github.com/proger/accelerated-scan) (CUDA warp-level implementation):
+
+![Scan kernel benchmark on H100 80GB](docs/h100_scan_benchmark.png)
+
+The 1-kernel onepass variant matches or beats the CUDA warp scan across all sequence lengths, and scales beyond its 65K limit.
+
+To run the benchmark yourself:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --group bench python bench/bench_vs_warpscan.py
+```
+
 ## how it works
 
 The scan is split into fixed-size chunks. For a single chunk, `tl.associative_scan` runs entirely in SRAM. For multiple chunks, a single-kernel pipelined pass propagates the running prefix across chunks with software pipelining (`tl.range(num_stages=N)`) to overlap loads with compute.
