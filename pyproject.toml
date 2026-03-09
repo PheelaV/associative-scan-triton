@@ -19,6 +19,9 @@ build-backend = "uv_build"
 [dependency-groups]
 bench = [
     "accelerated-scan>=0.3.1",
+    "matplotlib>=3.10.8",
+    "ninja>=1.13.0",
+    "pandas>=2.3.3",
 ]
 dev = [
     "jax>=0.6.2",

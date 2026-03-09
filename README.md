@@ -75,11 +75,9 @@ Requires PyTorch >= 2.10 and Triton >= 3.6 (ships with recent PyTorch).
 
 ## performance
 
-Scan kernel forward pass on H100 80GB, config `(B=8, C=1536, seqlen)`, inference mode. Compared against [accelerated-scan](https://github.com/proger/accelerated-scan) (CUDA warp-level implementation):
+Scan kernel forward pass on H100 80GB, config `(B=8, C=1536, seqlen)`, inference mode. Compared against [accelerated-scan](https://github.com/proger/accelerated-scan) (CUDA warp-level implementation). The Triton 1-kernel onepass beats the CUDA warp scan across all sequence lengths, and scales beyond its 65K limit:
 
 ![Scan kernel benchmark on H100 80GB](docs/h100_scan_benchmark.png)
-
-The 1-kernel onepass variant matches or beats the CUDA warp scan across all sequence lengths, and scales beyond its 65K limit.
 
 To run the benchmark yourself:
 

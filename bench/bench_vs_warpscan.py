@@ -63,6 +63,8 @@ if HAS_WARPSCAN:
 )
 def bench(provider, seqlen, device=device):
   if provider == "accelerated_scan":
+    if seqlen > 65536:
+      return float("nan")  # warpscan caps at 65K
     gates = 0.999 + 0.001 * torch.rand(B, C, seqlen, device=device)
     tokens = torch.rand(B, C, seqlen, device=device)
 
