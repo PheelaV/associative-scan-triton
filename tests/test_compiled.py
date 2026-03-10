@@ -2,9 +2,7 @@
 
 Verifies that:
 1. scan_bidirectional_branched_compiled matches scan_bidirectional_branched
-2. Same with scan_grad_scale=True
-3. shift_pad_compiled matches shift_pad
-4. Compiled scan with normalize_scan_grad_r matches eager
+2. shift_pad_compiled matches shift_pad
 """
 
 import pytest
@@ -90,60 +88,6 @@ class TestTritonOpsCorrectness:
     torch.testing.assert_close(ref_fwd, test_fwd, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(ref_bwd, test_bwd, rtol=1e-5, atol=1e-5)
 
-  @pytest.mark.parametrize("batch_size", [1, 4])
-  @pytest.mark.parametrize("seq_len", [64, 256])
-  def test_scan_grad_scale_compiled_matches_original(
-    self, batch_size, seq_len, device
-  ):
-    """Compiled scan with scan_grad_scale must match non-compiled gradients."""
-    no_channels = 64
-    cu_seqlens = _make_cu_seqlens(batch_size, seq_len, device)
-    total_len = int(cu_seqlens[-1].item())
-    grid = get_grid(len(cu_seqlens), seq_len, 128, no_channels)
-
-    def make_inputs(requires_grad=True):
-      torch.manual_seed(TEST_SEED)
-      return (
-        torch.rand(no_channels, total_len, device=device, requires_grad=requires_grad),
-        torch.randn(no_channels, total_len, device=device, requires_grad=requires_grad),
-        torch.rand(no_channels, total_len, device=device, requires_grad=requires_grad),
-        torch.randn(no_channels, total_len, device=device, requires_grad=requires_grad),
-      )
-
-    args = {
-      "cu_seqlens": cu_seqlens, "chunk_size": 128, "grid": grid,
-      "scan_grad_scale": True,
-    }
-
-    # Reference (non-compiled)
-    gf1, tf1, gb1, tb1 = make_inputs()
-    ref_fwd, ref_bwd = scan_bidirectional_branched(
-      gf1, tf1, gb1, tb1, args,
-    )
-    (ref_fwd.sum() + ref_bwd.sum()).backward()
-
-    # Test (compiled)
-    gf2, tf2, gb2, tb2 = make_inputs()
-    test_fwd, test_bwd = scan_bidirectional_branched_compiled(
-      gf2, tf2, gb2, tb2, args,
-    )
-    (test_fwd.sum() + test_bwd.sum()).backward()
-
-    # Forward outputs
-    rtol, atol = 1e-5, 1e-5
-    torch.testing.assert_close(ref_fwd, test_fwd, rtol=rtol, atol=atol)
-    torch.testing.assert_close(ref_bwd, test_bwd, rtol=rtol, atol=atol)
-
-    # Gradients: d_gates and d_tokens for both directions
-    torch.testing.assert_close(gf1.grad, gf2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_gates_fwd mismatch")
-    torch.testing.assert_close(tf1.grad, tf2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_tokens_fwd mismatch")
-    torch.testing.assert_close(gb1.grad, gb2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_gates_bwd mismatch")
-    torch.testing.assert_close(tb1.grad, tb2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_tokens_bwd mismatch")
-
   @pytest.mark.parametrize("backward", [True, False])
   @pytest.mark.parametrize("pad_value", [0.0, 1.0])
   def test_shift_pad_matches_original(self, backward, pad_value, device):
@@ -158,57 +102,3 @@ class TestTritonOpsCorrectness:
     )
 
     torch.testing.assert_close(ref, test, rtol=0, atol=0)
-
-  @pytest.mark.parametrize("batch_size", [1, 4])
-  @pytest.mark.parametrize("seq_len", [64, 256])
-  def test_normalize_scan_grad_r_compiled_matches_original(
-    self, batch_size, seq_len, device
-  ):
-    """Compiled scan with normalize_scan_grad_r must match non-compiled gradients."""
-    no_channels = 64
-    cu_seqlens = _make_cu_seqlens(batch_size, seq_len, device)
-    total_len = int(cu_seqlens[-1].item())
-    grid = get_grid(len(cu_seqlens), seq_len, 128, no_channels)
-
-    def make_inputs(requires_grad=True):
-      torch.manual_seed(TEST_SEED)
-      return (
-        torch.rand(no_channels, total_len, device=device, requires_grad=requires_grad),
-        torch.randn(no_channels, total_len, device=device, requires_grad=requires_grad),
-        torch.rand(no_channels, total_len, device=device, requires_grad=requires_grad),
-        torch.randn(no_channels, total_len, device=device, requires_grad=requires_grad),
-      )
-
-    args = {
-      "cu_seqlens": cu_seqlens, "chunk_size": 128, "grid": grid,
-      "normalize_scan": True, "normalize_scan_grad_r": True,
-    }
-
-    # Reference (non-compiled)
-    gf1, tf1, gb1, tb1 = make_inputs()
-    ref_fwd, ref_bwd = scan_bidirectional_branched(
-      gf1, tf1, gb1, tb1, args,
-    )
-    (ref_fwd.sum() + ref_bwd.sum()).backward()
-
-    # Test (compiled)
-    gf2, tf2, gb2, tb2 = make_inputs()
-    test_fwd, test_bwd = scan_bidirectional_branched_compiled(
-      gf2, tf2, gb2, tb2, args,
-    )
-    (test_fwd.sum() + test_bwd.sum()).backward()
-
-    # Forward outputs
-    rtol, atol = 1e-5, 1e-5
-    torch.testing.assert_close(ref_fwd, test_fwd, rtol=rtol, atol=atol)
-    torch.testing.assert_close(ref_bwd, test_bwd, rtol=rtol, atol=atol)
-
-    # Gradients
-    torch.testing.assert_close(gf1.grad, gf2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_gates_fwd mismatch")
-    torch.testing.assert_close(tf1.grad, tf2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_tokens_fwd mismatch")
-    torch.testing.assert_close(gb1.grad, gb2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_gates_bwd mismatch")
-    torch.testing.assert_close(tb1.grad, tb2.grad, rtol=1e-4, atol=1e-5,
-                               msg="d_tokens_bwd mismatch")

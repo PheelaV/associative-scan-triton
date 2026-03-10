@@ -7,8 +7,7 @@ Contains:
 
 import torch
 
-from associative_scan_triton._dispatcher import forward_scan_full
-from associative_scan_triton._shift_pad import shift_pad
+from associative_scan_triton._dispatcher import backward_scan_fused_full, forward_scan_full
 
 
 # ============================================================
@@ -29,41 +28,35 @@ class ScanCausal(torch.autograd.Function):
       args["cu_seqlens"], args["chunk_size"], args["grid"],
     )
     need_backward = gates.requires_grad or tokens.requires_grad
-    gates_work = gates.detach().clone()
-    save_tokens = tokens.detach().clone()
-    if need_backward:
-      save_gates = gates.detach().clone()
+
+    # Non-in-place: gates and tokens are READ-ONLY
+    out_tokens = torch.empty_like(tokens)
     forward_scan_full(
-      gates_work, save_tokens, cu_seqlens, grid,
+      gates, tokens, cu_seqlens, grid,
       REVERSE=False, CHUNK_SIZE=chunk_size,
+      TESTING=False, tokens_out=out_tokens,
     )
+
     if need_backward:
       ctx.grid = grid
       ctx.cu_seqlens = cu_seqlens
       ctx.chunk_size = chunk_size
-      ctx.save_for_backward(save_tokens, save_gates)
-    return save_tokens
+      # gates is unmodified — save directly, NO CLONE
+      ctx.save_for_backward(out_tokens, gates)
+    return out_tokens
 
   @staticmethod
   def backward(ctx, grad_output):
     grid = ctx.grid
     states, gates = ctx.saved_tensors
-    assert gates.is_contiguous()
-    assert states.is_contiguous()
     cu_seqlens = ctx.cu_seqlens
     chunk_size = ctx.chunk_size
-    d_tokens = grad_output.clone().detach()
-    gates_shift_up = shift_pad(
-      data=gates, cu_seqlens=cu_seqlens, backward=False, pad_value=1
+    d_tokens = torch.empty_like(grad_output)
+    d_gates = torch.empty_like(gates)
+    backward_scan_fused_full(
+      grad_output.contiguous(), gates, states, d_tokens, d_gates,
+      cu_seqlens, grid, CHUNK_SIZE=chunk_size, CAUSAL=True,
     )
-    forward_scan_full(
-      gates_shift_up, d_tokens, cu_seqlens, grid,
-      REVERSE=True, CHUNK_SIZE=chunk_size,
-    )
-    states_shift_down = shift_pad(
-      data=states, cu_seqlens=cu_seqlens, backward=True, pad_value=0
-    )
-    d_gates = states_shift_down * d_tokens
     return d_gates, d_tokens, None
 
 
@@ -113,39 +106,24 @@ class ScanBidirectionalBranched(torch.autograd.Function):
       args["chunk_size"],
       args["grid"],
     )
-    scan_grad_scale = args.get("scan_grad_scale", False)
-    normalize_scan_grad_r = args.get("normalize_scan_grad_r", False)
     need_backward = (
       gates_fwd.requires_grad or tokens_fwd.requires_grad
       or gates_bwd.requires_grad or tokens_bwd.requires_grad
     )
 
-    gates_fwd = gates_fwd.detach()
-    save_tokens_fwd = tokens_fwd.detach()
-    gates_bwd = gates_bwd.detach()
-    save_tokens_bwd = tokens_bwd.detach()
-
-    if need_backward:
-      save_gates_fwd = gates_fwd.clone()
-      save_gates_bwd = gates_bwd.clone()
+    # Non-in-place: all inputs are READ-ONLY
+    out_tokens_fwd = torch.empty_like(tokens_fwd)
+    out_tokens_bwd = torch.empty_like(tokens_bwd)
 
     forward_scan_full(
-      gates_fwd,
-      save_tokens_fwd,
-      cu_seqlens,
-      grid,
-      REVERSE=False,
-      CHUNK_SIZE=chunk_size,
-      TESTING=testing,
+      gates_fwd, tokens_fwd, cu_seqlens, grid,
+      REVERSE=False, CHUNK_SIZE=chunk_size,
+      TESTING=False, tokens_out=out_tokens_fwd,
     )
     forward_scan_full(
-      gates_bwd,
-      save_tokens_bwd,
-      cu_seqlens,
-      grid,
-      REVERSE=True,
-      CHUNK_SIZE=chunk_size,
-      TESTING=testing,
+      gates_bwd, tokens_bwd, cu_seqlens, grid,
+      REVERSE=True, CHUNK_SIZE=chunk_size,
+      TESTING=False, tokens_out=out_tokens_bwd,
     )
 
     if need_backward:
@@ -153,127 +131,34 @@ class ScanBidirectionalBranched(torch.autograd.Function):
       ctx.cu_seqlens = cu_seqlens
       ctx.chunk_size = chunk_size
       ctx.testing = testing
-      ctx.scan_grad_scale = scan_grad_scale
-      ctx.normalize_scan_grad_r = normalize_scan_grad_r
-
-      if normalize_scan_grad_r:
-        r_fwd = args["_r_fwd"]
-        r_bwd = args["_r_bwd"]
-        ctx.save_for_backward(
-          save_tokens_fwd, save_tokens_bwd, save_gates_fwd, save_gates_bwd,
-          r_fwd, r_bwd,
-        )
-      else:
-        ctx.save_for_backward(
-          save_tokens_fwd, save_tokens_bwd, save_gates_fwd, save_gates_bwd
-        )
-    return save_tokens_fwd, save_tokens_bwd
+      # gates are unmodified — save directly, NO CLONE
+      ctx.save_for_backward(
+        out_tokens_fwd, out_tokens_bwd, gates_fwd, gates_bwd
+      )
+    return out_tokens_fwd, out_tokens_bwd
 
   @staticmethod
   def backward(ctx, grad_output_fwd, grad_output_bwd):
     grid = ctx.grid
-    if ctx.normalize_scan_grad_r:
-      states_fwd, states_bwd, gates_fwd, gates_bwd, r_fwd, r_bwd = (
-        ctx.saved_tensors
-      )
-    else:
-      states_fwd, states_bwd, gates_fwd, gates_bwd = ctx.saved_tensors
-    assert gates_fwd.is_contiguous()
-    assert gates_bwd.is_contiguous()
-    assert states_fwd.is_contiguous()
-    assert states_bwd.is_contiguous()
+    states_fwd, states_bwd, gates_fwd, gates_bwd = ctx.saved_tensors
     cu_seqlens = ctx.cu_seqlens
     chunk_size = ctx.chunk_size
-    testing = ctx.testing
 
-    d_tokens_fwd = grad_output_fwd.clone()
-    d_tokens_bwd = grad_output_bwd.clone()
-    gates_shift_up_fwd = shift_pad(
-      data=gates_fwd, cu_seqlens=cu_seqlens, backward=False, pad_value=1
+    d_tokens_fwd = torch.empty_like(grad_output_fwd)
+    d_gates_fwd = torch.empty_like(gates_fwd)
+    d_tokens_bwd = torch.empty_like(grad_output_bwd)
+    d_gates_bwd = torch.empty_like(gates_bwd)
+
+    backward_scan_fused_full(
+      grad_output_fwd.contiguous(), gates_fwd, states_fwd,
+      d_tokens_fwd, d_gates_fwd,
+      cu_seqlens, grid, CHUNK_SIZE=chunk_size, CAUSAL=True,
     )
-    gates_shift_down_bwd = shift_pad(
-      data=gates_bwd, cu_seqlens=cu_seqlens, backward=True, pad_value=1
+    backward_scan_fused_full(
+      grad_output_bwd.contiguous(), gates_bwd, states_bwd,
+      d_tokens_bwd, d_gates_bwd,
+      cu_seqlens, grid, CHUNK_SIZE=chunk_size, CAUSAL=False,
     )
-    forward_scan_full(
-      gates_shift_up_fwd,
-      d_tokens_fwd,
-      cu_seqlens,
-      grid,
-      REVERSE=True,
-      CHUNK_SIZE=chunk_size,
-      TESTING=testing,
-    )
-    forward_scan_full(
-      gates_shift_down_bwd,
-      d_tokens_bwd,
-      cu_seqlens,
-      grid,
-      REVERSE=False,
-      CHUNK_SIZE=chunk_size,
-      TESTING=testing,
-    )
-    states_shift_down_fwd = shift_pad(
-      data=states_fwd, cu_seqlens=cu_seqlens, backward=True, pad_value=0
-    )
-    states_shift_up_bwd = shift_pad(
-      data=states_bwd, cu_seqlens=cu_seqlens, backward=False, pad_value=0
-    )
-    d_gates_fwd = states_shift_down_fwd * d_tokens_fwd
-    d_gates_bwd = states_shift_up_bwd * d_tokens_bwd
-
-    if ctx.scan_grad_scale:
-      gates_r_fwd = shift_pad(
-        data=gates_fwd, cu_seqlens=cu_seqlens, backward=False, pad_value=1
-      )
-      gates_r_bwd = shift_pad(
-        data=gates_bwd, cu_seqlens=cu_seqlens, backward=True, pad_value=1
-      )
-      r_fwd_fix3 = torch.ones_like(gates_fwd)
-      r_bwd_fix3 = torch.ones_like(gates_bwd)
-      forward_scan_full(
-        gates_r_fwd, r_fwd_fix3, cu_seqlens, grid,
-        REVERSE=True, CHUNK_SIZE=chunk_size, TESTING=testing,
-      )
-      forward_scan_full(
-        gates_r_bwd, r_bwd_fix3, cu_seqlens, grid,
-        REVERSE=False, CHUNK_SIZE=chunk_size, TESTING=testing,
-      )
-      d_gates_fwd = d_gates_fwd / r_fwd_fix3.clamp(min=1.0)
-      d_gates_bwd = d_gates_bwd / r_bwd_fix3.clamp(min=1.0)
-
-    if ctx.normalize_scan_grad_r:
-      r_fwd_c = r_fwd.clamp(min=1.0)
-      r_bwd_c = r_bwd.clamp(min=1.0)
-
-      d_r_seed_fwd = -grad_output_fwd * states_fwd / r_fwd_c
-      d_r_seed_bwd = -grad_output_bwd * states_bwd / r_bwd_c
-
-      gates_r_shift_fwd = shift_pad(
-        data=gates_fwd, cu_seqlens=cu_seqlens, backward=False, pad_value=1
-      )
-      d_r_fwd = d_r_seed_fwd.clone()
-      forward_scan_full(
-        gates_r_shift_fwd, d_r_fwd, cu_seqlens, grid,
-        REVERSE=True, CHUNK_SIZE=chunk_size, TESTING=testing,
-      )
-
-      gates_r_shift_bwd = shift_pad(
-        data=gates_bwd, cu_seqlens=cu_seqlens, backward=True, pad_value=1
-      )
-      d_r_bwd = d_r_seed_bwd.clone()
-      forward_scan_full(
-        gates_r_shift_bwd, d_r_bwd, cu_seqlens, grid,
-        REVERSE=False, CHUNK_SIZE=chunk_size, TESTING=testing,
-      )
-
-      r_shift_down_fwd = shift_pad(
-        data=r_fwd, cu_seqlens=cu_seqlens, backward=True, pad_value=0
-      )
-      r_shift_up_bwd = shift_pad(
-        data=r_bwd, cu_seqlens=cu_seqlens, backward=False, pad_value=0
-      )
-      d_gates_fwd = d_gates_fwd + r_shift_down_fwd * d_r_fwd
-      d_gates_bwd = d_gates_bwd + r_shift_up_bwd * d_r_bwd
 
     return (
       d_gates_fwd,
@@ -306,51 +191,11 @@ def scan_bidirectional_branched(
       - "cu_seqlens": [B+1] cumulative sequence lengths
       - "chunk_size": int, scan chunk size
       - "grid": tuple (num_seq, num_chunks, no_channels)
-      - "normalize_scan": bool (optional), enable output normalization
-      - "normalize_scan_grad_r": bool (optional), enable R-gradient
-      - "scan_grad_scale": bool (optional), enable gradient scaling
-      - "xlstm_normalizer": bool (optional), use xLSTM normalizer
     testing: if True, write gate values during scan (needed for gradient checks)
 
   Returns:
     (scanned_tokens_fwd, scanned_tokens_bwd)
   """
-  normalize_scan = args.get("normalize_scan", False)
-  normalize_scan_grad_r = args.get("normalize_scan_grad_r", False)
-  xlstm_normalizer = args.get("xlstm_normalizer", False)
-
-  if normalize_scan:
-    gates_fwd_clean = gates_fwd.clone()
-    gates_bwd_clean = gates_bwd.clone()
-
-  if normalize_scan:
-    cu_seqlens = args["cu_seqlens"]
-    chunk_size = args["chunk_size"]
-    grid = args["grid"]
-    if xlstm_normalizer:
-      r_fwd = (1.0 - gates_fwd_clean).clone()
-      r_bwd = (1.0 - gates_bwd_clean).clone()
-    else:
-      r_fwd = torch.ones_like(gates_fwd_clean)
-      r_bwd = torch.ones_like(gates_bwd_clean)
-    forward_scan_full(
-      gates_fwd_clean, r_fwd, cu_seqlens, grid,
-      REVERSE=False, CHUNK_SIZE=chunk_size, TESTING=testing,
-    )
-    forward_scan_full(
-      gates_bwd_clean, r_bwd, cu_seqlens, grid,
-      REVERSE=True, CHUNK_SIZE=chunk_size, TESTING=testing,
-    )
-    if normalize_scan_grad_r:
-      args["_r_fwd"] = r_fwd
-      args["_r_bwd"] = r_bwd
-
-  y_fwd, y_bwd = ScanBidirectionalBranched.apply(
+  return ScanBidirectionalBranched.apply(
     gates_fwd, tokens_fwd, gates_bwd, tokens_bwd, args, testing
   )
-
-  if normalize_scan:
-    y_fwd = y_fwd / r_fwd.detach().clamp(min=1.0)
-    y_bwd = y_bwd / r_bwd.detach().clamp(min=1.0)
-
-  return y_fwd, y_bwd

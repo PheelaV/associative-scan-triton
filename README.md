@@ -79,6 +79,20 @@ Scan kernel forward pass on H100 80GB, config `(B=8, C=1536, seqlen)`, inference
 
 ![Scan kernel benchmark on H100 80GB](docs/h100_scan_benchmark.png)
 
+| seqlen | ours (ms) | warpscan (ms) | speedup | cumulative avg speedup |
+|-------:|----------:|--------------:|--------:|-----------------------:|
+| 128 | 0.0139 | 0.0178 | 1.28x | 1.28x |
+| 256 | 0.0194 | 0.0283 | 1.46x | 1.37x |
+| 512 | 0.0331 | 0.0515 | 1.56x | 1.43x |
+| 1024 | 0.0719 | 0.0778 | 1.08x | 1.34x |
+| 2048 | 0.1276 | 0.1522 | 1.19x | 1.31x |
+| 4096 | 0.2369 | 0.2691 | 1.14x | 1.28x |
+| 8192 | 0.4584 | 0.5247 | 1.14x | 1.26x |
+| 16384 | 0.9117 | 1.0400 | 1.14x | 1.25x |
+| 32768 | 1.8176 | 2.0733 | 1.14x | 1.24x |
+| 65536 | 3.5752 | 4.1640 | 1.16x | 1.23x |
+| 131072 | 7.1413 | — | — | — |
+
 To run the benchmark yourself:
 
 ```bash
@@ -91,7 +105,7 @@ The scan is split into fixed-size chunks. For a single chunk, `tl.associative_sc
 
 Variable-length sequences are handled via `cu_seqlens` (cumulative sequence lengths, same convention as flash-attn). Each sequence is scanned independently — no cross-document leakage.
 
-The backward pass computes `d_tokens` via a reverse scan on shifted gates, and `d_gates = shifted_states * d_tokens`. Optional features: `scan_grad_scale` (divide `d_gates` by receptive field R[t]) and `normalize_scan` (divide output by R[t] to bound magnitude).
+The backward pass computes `d_tokens` via a reverse scan on shifted gates, and `d_gates = shifted_states * d_tokens`.
 
 ## tests
 
@@ -99,7 +113,7 @@ The backward pass computes `d_tokens` via a reverse scan on shifted gates, and `
 CUDA_VISIBLE_DEVICES=0 uv run python -m pytest tests/ -v
 ```
 
-359 tests covering: kernel numerics, forward/backward correctness against JAX reference (`jax.lax.associative_scan`), shift-pad, compiled-vs-eager parity, gradient scaling, and output normalization.
+Tests covering kernel numerics, forward/backward correctness against JAX reference (`jax.lax.associative_scan`), shift-pad, and compiled-vs-eager parity.
 
 ## license
 

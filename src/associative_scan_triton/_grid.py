@@ -35,6 +35,26 @@ def get_grid(
   return (no_seq - 1, num_chunks, no_channels)
 
 
+def get_num_stages(num_chunks: int, kernel: str = "fwd") -> int:
+  """Return optimal NUM_STAGES for software pipelining.
+
+  Tuned on H100 with B=8, C=1536, chunk_size=512.
+
+  Args:
+    num_chunks: number of chunks in the scan
+    kernel: "fwd" for forward, "bwd" for backward
+
+  Returns:
+    Optimal NUM_STAGES value (1-3)
+  """
+  if num_chunks <= 1:
+    return 1  # single-chunk kernels don't use stages
+  if kernel == "fwd":
+    return 1 if num_chunks <= 4 else 3
+  else:  # bwd
+    return 2 if num_chunks <= 4 else 3
+
+
 def get_static_grid(
   max_seqlen: int, chunk_size: int, no_channels: int
 ) -> tuple[int, int]:

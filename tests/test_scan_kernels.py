@@ -74,20 +74,24 @@ class TestScanKernels:
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=True,
       TESTING=True,
+      INPLACE=True,
     )
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=False,
       TESTING=True,
+      INPLACE=True,
     )
 
   @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -116,21 +120,25 @@ class TestScanKernels:
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=True,
       REVERSE=False,
       TESTING=True,
+      INPLACE=True,
     )
 
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=False,
       REVERSE=False,
       TESTING=True,
+      INPLACE=True,
     )
 
   @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -183,22 +191,26 @@ class TestScanKernels:
     forward_scan_chunked[grid](
       gates_ptr=first_gates,
       tokens_ptr=first_tokens,
+      tokens_out_ptr=first_tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=True,
       TESTING=True,
+      INPLACE=True,
     )
     # this is redundant as it should not be called twice when using a single
     # chunk, but logic supports it so it is tested
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=False,
       TESTING=True,
+      INPLACE=True,
     )
 
     # Assert
@@ -251,22 +263,26 @@ class TestScanKernels:
     forward_scan_chunked[grid](
       gates_ptr=first_gates,
       tokens_ptr=first_tokens,
+      tokens_out_ptr=first_tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=True,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=True,
       TESTING=True,
+      INPLACE=True,
     )
     # this is redundant as it should not be called twice when using a single
     # chunk, but logic supports it so it is tested
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=True,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=False,
       TESTING=True,
+      INPLACE=True,
     )
 
     # Assert
@@ -322,20 +338,24 @@ class TestScanKernels:
     forward_scan_chunked[grid](
       gates_ptr=gates_first,
       tokens_ptr=tokens_first,
+      tokens_out_ptr=tokens_first,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=True,
       TESTING=True,
+      INPLACE=True,
     )
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=False,
       TESTING=True,
+      INPLACE=True,
     )
 
     # Assert
@@ -381,11 +401,13 @@ class TestScanKernels:
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
+      tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=True,
       CHUNK_SIZE=chunk_size,
       FIRST_CALL=True,
       TESTING=True,
+      INPLACE=True,
     )
 
     # Assert
