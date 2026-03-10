@@ -139,11 +139,37 @@ Our backward fuses the reverse scan + gate gradient computation into a single ke
 - **torch.compile**: works with `@triton_op` wrappers, warpscan is a C++ extension that breaks the compiler
 - **Bidirectional scan**: built-in, not bolted on
 - **No sequence length limit**: warpscan caps at 65536, we handle arbitrary lengths
+- **fp16/bf16 numerical stability**: multi-chunk kernels upcast to fp32 internally — warpscan accumulates in native half precision and [diverges at seqlen >= 4096](#numerical-accuracy)
 
-To run the benchmark yourself:
+### When to use warpscan instead
+
+- **Forward-only inference at long sequences (seqlen >= 4096)**: warpscan's hand-tuned CUDA kernel is ~12-14% faster for forward-only passes at large sequence lengths. If you're doing inference without backward passes on fixed-length, power-of-2 sequences, warpscan is the faster choice.
+- **You don't need variable-length packing, bidirectional scans, or torch.compile**: if your use case is simple fixed-length fp32 forward passes, warpscan's raw kernel speed at large seqlens may matter more than our feature set.
+
+### Numerical accuracy
+
+![Accuracy benchmark on H100 80GB](docs/h100_accuracy_benchmark.png)
+
+RMSE vs sequential fp64 gold label (H100, C=4):
+
+| dtype | seqlen | ours (RMSE) | warpscan (RMSE) | note |
+|------:|-------:|------------:|----------------:|:-----|
+| fp32 | 128 | 6.55e-08 | 7.14e-08 | both near machine epsilon |
+| fp32 | 8192 | 6.69e-08 | 6.70e-08 | both near machine epsilon |
+| fp16 | 512 | 4.89e-04 | 5.27e-04 | ours ~7% lower |
+| fp16 | 2048 | 2.58e-04 | 5.21e-04 | ours ~2x lower (fp32 accum) |
+| fp16 | 8192 | 2.58e-04 | **diverged** | warpscan produces Inf |
+| bf16 | 512 | 3.68e-03 | 3.96e-03 | ours ~7% lower |
+| bf16 | 2048 | 2.07e-03 | 3.96e-03 | ours ~2x lower (fp32 accum) |
+| bf16 | 4096 | 2.06e-03 | **diverged** | warpscan overflows to ~10^18 |
+
+Our multi-chunk pipelined kernels upcast fp16/bf16 loads to fp32 for scan accumulation, matching the fp32 prefix state. This gives consistently lower error at all sequence lengths and prevents the overflow that warpscan hits at seqlen >= 4096 in half precision.
+
+To run the benchmarks yourself:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 uv run --group bench python bench/bench_kernels.py
+CUDA_VISIBLE_DEVICES=0 uv run --group bench python bench/bench_kernels.py     # speed
+CUDA_VISIBLE_DEVICES=0 uv run python bench/bench_accuracy.py                   # accuracy
 ```
 
 ## how it works
@@ -160,7 +186,7 @@ The backward pass computes `d_tokens` via a reverse scan on shifted gates, and `
 CUDA_VISIBLE_DEVICES=0 uv run python -m pytest tests/ -v
 ```
 
-Tests covering kernel numerics, forward/backward correctness against JAX reference (`jax.lax.associative_scan`), shift-pad, and compiled-vs-eager parity.
+Tests covering kernel numerics, forward/backward correctness against JAX reference (`jax.lax.associative_scan`), fp16/bf16 precision (vs sequential fp64 gold label), shift-pad, compiled-vs-eager parity, and variable-length packing.
 
 ## license
 

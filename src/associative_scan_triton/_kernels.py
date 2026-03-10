@@ -157,10 +157,12 @@ def forward_scan_onepass_pipelined(
     mask = seq_end > seq_range
 
     # Load (2 reads — pipelining prefetches these from next iteration)
+    # Cast to fp32 for scan accumulation (matches prefix_gate/prefix_token dtype,
+    # prevents type mismatch in the if/else branch below for fp16/bf16 inputs)
     gates_ptrs = gates_ptr + seq_range + channel_offset
     tokens_ptrs = tokens_ptr + seq_range + channel_offset
-    gates = tl.load(gates_ptrs, mask=mask, other=1.0)
-    tokens = tl.load(tokens_ptrs, mask=mask, other=0.0)
+    gates = tl.load(gates_ptrs, mask=mask, other=1.0).to(tl.float32)
+    tokens = tl.load(tokens_ptrs, mask=mask, other=0.0).to(tl.float32)
 
     # Seed element 0 with accumulated prefix (skip first chunk)
     if loop_idx > 0:
@@ -246,10 +248,10 @@ def backward_scan_fused(
       seq_range = seq_start + input_range + chunk_offset
     mask = seq_end > seq_range
 
-    # Load grad (no shift)
-    grad_vals = tl.load(grad_ptr + seq_range + channel_offset, mask=mask, other=0.0)
+    # Load grad (no shift) — cast to fp32 for scan accumulation
+    grad_vals = tl.load(grad_ptr + seq_range + channel_offset, mask=mask, other=0.0).to(tl.float32)
 
-    # Load shifted gates (inline shift_pad)
+    # Load shifted gates (inline shift_pad) — cast to fp32 for scan accumulation
     if CAUSAL:
       shifted_gate_pos = seq_range + 1
       gate_boundary = shifted_gate_pos >= seq_end
@@ -261,7 +263,7 @@ def backward_scan_fused(
     shifted_gates = tl.load(
       gates_ptr + shifted_gate_pos_safe + channel_offset,
       mask=mask & ~gate_boundary, other=1.0,
-    )
+    ).to(tl.float32)
     shifted_gates = tl.where(gate_boundary & mask, 1.0, shifted_gates)
 
     # Seed with prefix and scan
