@@ -48,8 +48,13 @@ y_fwd, y_bwd = scan_bidirectional_branched_compiled(
 
 ## install
 
+With `pyproject.toml`:
 ```bash
 uv add associative-scan-triton --git https://github.com/PheelaV/associative-scan-triton.git
+```
+with `.venv`:
+```bash
+uv pip install git+https://github.com/PheelaV/associative-scan-triton.git
 ```
 
 Or for development:
