@@ -78,18 +78,6 @@ class TestScanKernels:
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
-      FIRST_CALL=True,
-      TESTING=True,
-      INPLACE=True,
-    )
-    forward_scan_chunked[grid](
-      gates_ptr=gates,
-      tokens_ptr=tokens,
-      tokens_out_ptr=tokens,
-      cu_seqlens_ptr=cu_seqlens,
-      REVERSE=False,
-      CHUNK_SIZE=chunk_size,
-      FIRST_CALL=False,
       TESTING=True,
       INPLACE=True,
     )
@@ -123,19 +111,6 @@ class TestScanKernels:
       tokens_out_ptr=tokens,
       cu_seqlens_ptr=cu_seqlens,
       CHUNK_SIZE=chunk_size,
-      FIRST_CALL=True,
-      REVERSE=False,
-      TESTING=True,
-      INPLACE=True,
-    )
-
-    forward_scan_chunked[grid](
-      gates_ptr=gates,
-      tokens_ptr=tokens,
-      tokens_out_ptr=tokens,
-      cu_seqlens_ptr=cu_seqlens,
-      CHUNK_SIZE=chunk_size,
-      FIRST_CALL=False,
       REVERSE=False,
       TESTING=True,
       INPLACE=True,
@@ -171,36 +146,14 @@ class TestScanKernels:
     gates = torch.tensor([1.0, 1.5, 0.8, 2.0]).squeeze(0).to(device)
     tokens = torch.tensor([1.0, -1.0, 0.5, 2.0]).squeeze(0).to(device)
 
-    expected_result_gates_first_call = (
+    expected_gates = (
       torch.tensor([1.0, 1.5, 1.2, 2.4]).squeeze(0).to(device)
     )
-    expected_result_tokens_first_call = (
+    expected_tokens = (
       torch.tensor([1.0, 0.5, 0.9, 3.8]).squeeze(0).to(device)
     )
 
-    expected_result_gates_second_call = (
-      torch.tensor([1, 1.5, 1.2, 2.4]).squeeze(0).to(device)
-    )
-    expected_result_tokens_second_call = (
-      torch.tensor([1, 0.5, 0.9, 3.8]).squeeze(0).to(device)
-    )
     # Act
-    first_gates = gates.clone()
-    first_tokens = tokens.clone()
-
-    forward_scan_chunked[grid](
-      gates_ptr=first_gates,
-      tokens_ptr=first_tokens,
-      tokens_out_ptr=first_tokens,
-      cu_seqlens_ptr=cu_seqlens,
-      REVERSE=False,
-      CHUNK_SIZE=chunk_size,
-      FIRST_CALL=True,
-      TESTING=True,
-      INPLACE=True,
-    )
-    # this is redundant as it should not be called twice when using a single
-    # chunk, but logic supports it so it is tested
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
@@ -208,17 +161,13 @@ class TestScanKernels:
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=False,
       CHUNK_SIZE=chunk_size,
-      FIRST_CALL=False,
       TESTING=True,
       INPLACE=True,
     )
 
     # Assert
-    assert torch.allclose(expected_result_gates_first_call, first_gates)
-    assert torch.allclose(expected_result_tokens_first_call, first_tokens)
-
-    assert torch.allclose(expected_result_gates_second_call, gates)
-    assert torch.allclose(expected_result_tokens_second_call, tokens)
+    assert torch.allclose(expected_gates, gates)
+    assert torch.allclose(expected_tokens, tokens)
 
   @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
   # fmt: off
@@ -257,22 +206,6 @@ class TestScanKernels:
       torch.tensor([3.15, 2.15, 2.1, 2.0]).squeeze(0).to(device)
     )
     # Act
-    first_gates = gates.clone()
-    first_tokens = tokens.clone()
-
-    forward_scan_chunked[grid](
-      gates_ptr=first_gates,
-      tokens_ptr=first_tokens,
-      tokens_out_ptr=first_tokens,
-      cu_seqlens_ptr=cu_seqlens,
-      REVERSE=True,
-      CHUNK_SIZE=chunk_size,
-      FIRST_CALL=True,
-      TESTING=True,
-      INPLACE=True,
-    )
-    # this is redundant as it should not be called twice when using a single
-    # chunk, but logic supports it so it is tested
     forward_scan_chunked[grid](
       gates_ptr=gates,
       tokens_ptr=tokens,
@@ -280,132 +213,6 @@ class TestScanKernels:
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=True,
       CHUNK_SIZE=chunk_size,
-      FIRST_CALL=False,
-      TESTING=True,
-      INPLACE=True,
-    )
-
-    # Assert
-    assert torch.allclose(expected_result_gates, first_gates)
-    assert torch.allclose(expected_result_tokens, first_tokens)
-
-    assert torch.allclose(expected_result_gates, gates)
-    assert torch.allclose(expected_result_tokens, tokens)
-
-  @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-  def test_fwd_chunk_numeric_even_chunks(self) -> None:
-    """Assert values for chunking on even chunks and a single channel."""
-    # Setup
-    from associative_scan_triton import forward_scan_chunked
-
-    device = get_device()
-    repeat = 2
-    seqlen = 8
-
-    no_channels = 1
-    chunk_size = 4
-    num_chunks = 2
-    seqlens = torch.tensor([seqlen])
-    assert (chunk_size * num_chunks >= seqlens).all().item()
-    cu_seqlens = torch.cat((torch.tensor([0]), seqlens.cumsum(dim=0))).to(
-      device
-    )
-    gates = (
-      torch.tensor([1.0, 1.5, 0.8, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-    tokens = (
-      torch.tensor([1.0, -1.0, 0.5, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-    gates_first = gates.clone()
-    tokens_first = tokens.clone()
-    grid = _get_grid_from_cu_seqlens(cu_seqlens, chunk_size, no_channels)
-    # there are multiple chunks and this is the second call that does not
-    # update ports
-    expected_result_gates_first = (
-      torch.tensor([1, 1.5, 0.8, 2.4]).repeat(repeat).squeeze(0).to(device)
-    )
-    expected_result_tokens_first = (
-      torch.tensor([1, -1.0, 0.5, 3.8]).repeat(repeat).squeeze(0).to(device)
-    )
-    expected_result_gates_second = (
-      torch.tensor([1, 1.5, 1.2, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-    expected_result_tokens_second = (
-      torch.tensor([1, 0.5, 0.9, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-
-    # Act
-    forward_scan_chunked[grid](
-      gates_ptr=gates_first,
-      tokens_ptr=tokens_first,
-      tokens_out_ptr=tokens_first,
-      cu_seqlens_ptr=cu_seqlens,
-      REVERSE=False,
-      CHUNK_SIZE=chunk_size,
-      FIRST_CALL=True,
-      TESTING=True,
-      INPLACE=True,
-    )
-    forward_scan_chunked[grid](
-      gates_ptr=gates,
-      tokens_ptr=tokens,
-      tokens_out_ptr=tokens,
-      cu_seqlens_ptr=cu_seqlens,
-      REVERSE=False,
-      CHUNK_SIZE=chunk_size,
-      FIRST_CALL=False,
-      TESTING=True,
-      INPLACE=True,
-    )
-
-    # Assert
-    assert torch.allclose(expected_result_gates_first, gates_first)
-    assert torch.allclose(expected_result_tokens_first, tokens_first)
-    assert torch.allclose(expected_result_gates_second, gates)
-    assert torch.allclose(expected_result_tokens_second, tokens)
-
-  @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-  def test_fwd_chunk_numeric_even_chunks_reverse(self) -> None:
-    """Assert values for chunking on even chunks and a single channel."""
-    # Setup
-    from associative_scan_triton import forward_scan_chunked
-
-    device = get_device()
-    repeat = 2
-    seqlen = 8
-
-    no_channels = 1
-    chunk_size = 4
-    num_chunks = 2
-    seqlens = torch.tensor([seqlen])
-    assert (chunk_size * num_chunks >= seqlens).all().item()
-    cu_seqlens = torch.cat((torch.tensor([0]), seqlens.cumsum(dim=0))).to(
-      device
-    )
-    gates = (
-      torch.tensor([1.0, 1.5, 0.8, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-    tokens = (
-      torch.tensor([1.0, -1.0, 0.5, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-    grid = _get_grid_from_cu_seqlens(cu_seqlens, chunk_size, no_channels)
-    # only the ports should be updated
-    expected_result_gates = (
-      torch.tensor([2.4, 1.5, 0.8, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-    expected_result_tokens = (
-      torch.tensor([3.15, -1.0, 0.5, 2.0]).repeat(repeat).squeeze(0).to(device)
-    )
-
-    # Act
-    forward_scan_chunked[grid](
-      gates_ptr=gates,
-      tokens_ptr=tokens,
-      tokens_out_ptr=tokens,
-      cu_seqlens_ptr=cu_seqlens,
-      REVERSE=True,
-      CHUNK_SIZE=chunk_size,
-      FIRST_CALL=True,
       TESTING=True,
       INPLACE=True,
     )
@@ -413,6 +220,79 @@ class TestScanKernels:
     # Assert
     assert torch.allclose(expected_result_gates, gates)
     assert torch.allclose(expected_result_tokens, tokens)
+
+  @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+  def test_fwd_multi_chunk_numeric(self) -> None:
+    """Assert values for multi-chunk scan via forward_scan_full dispatcher."""
+    # Setup — multi-chunk routes through forward_scan_onepass_pipelined
+    from associative_scan_triton import forward_scan_full
+
+    device = get_device()
+    seqlen = 8
+    no_channels = 1
+    chunk_size = 4
+    seqlens = torch.tensor([seqlen])
+    cu_seqlens = torch.cat((torch.tensor([0]), seqlens.cumsum(dim=0))).to(
+      device
+    )
+    gates = torch.tensor(
+      [1.0, 1.5, 0.8, 2.0, 1.0, 1.5, 0.8, 2.0], device=device,
+    )
+    tokens = torch.tensor(
+      [1.0, -1.0, 0.5, 2.0, 1.0, -1.0, 0.5, 2.0], device=device,
+    )
+    grid = _get_grid_from_cu_seqlens(cu_seqlens, chunk_size, no_channels)
+
+    # h[t] = g[t]*h[t-1] + x[t]: 1, 0.5, 0.9, 3.8, 4.8, 6.2, 5.46, 12.92
+    expected_tokens = torch.tensor(
+      [1.0, 0.5, 0.9, 3.8, 4.8, 6.2, 5.46, 12.92], device=device,
+    )
+
+    # Act
+    forward_scan_full(
+      gates, tokens, cu_seqlens, grid,
+      REVERSE=False, CHUNK_SIZE=chunk_size, TESTING=True,
+    )
+
+    # Assert
+    assert torch.allclose(expected_tokens, tokens)
+
+  @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+  def test_fwd_multi_chunk_numeric_reverse(self) -> None:
+    """Assert values for multi-chunk reverse scan via forward_scan_full."""
+    from associative_scan_triton import forward_scan_full
+
+    device = get_device()
+    seqlen = 8
+    no_channels = 1
+    chunk_size = 4
+    seqlens = torch.tensor([seqlen])
+    cu_seqlens = torch.cat((torch.tensor([0]), seqlens.cumsum(dim=0))).to(
+      device
+    )
+    gates = torch.tensor(
+      [1.0, 1.5, 0.8, 2.0, 1.0, 1.5, 0.8, 2.0], device=device,
+    )
+    tokens = torch.tensor(
+      [1.0, -1.0, 0.5, 2.0, 1.0, -1.0, 0.5, 2.0], device=device,
+    )
+    grid = _get_grid_from_cu_seqlens(cu_seqlens, chunk_size, no_channels)
+
+    # Reverse: h[t] = g[t]*h[t+1] + x[t], from right to left
+    # h[7]=2.0, h[6]=2.1, h[5]=2.15, h[4]=3.15,
+    # h[3]=8.3, h[2]=7.14, h[1]=9.71, h[0]=10.71
+    expected_tokens = torch.tensor(
+      [10.71, 9.71, 7.14, 8.3, 3.15, 2.15, 2.1, 2.0], device=device,
+    )
+
+    # Act
+    forward_scan_full(
+      gates, tokens, cu_seqlens, grid,
+      REVERSE=True, CHUNK_SIZE=chunk_size, TESTING=True,
+    )
+
+    # Assert
+    assert torch.allclose(expected_tokens, tokens)
 
   @pytest.mark.parametrize(
     ("seqlen", "chunk_size", "no_channels"),

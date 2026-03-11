@@ -10,7 +10,6 @@ import triton
 import triton.language as tl
 from torch.library import triton_op, wrap_triton
 
-
 # ============================================================
 # Eager shift_pad (PyTorch, not compile-safe)
 # ============================================================
@@ -33,10 +32,11 @@ def shift_pad(
   Returns:
   - shifted_data: [C, BL] with sequences shifted and padded
   """
-
-  C, BL = data.shape
+  _C, BL = data.shape
   device = data.device
-  assert not (cu_seqlens[1:] == cu_seqlens[:-1]).any(), "can't shift_pad zero-length seqments"
+  assert not (
+    cu_seqlens[1:] == cu_seqlens[:-1]
+  ).any(), "can't shift_pad zero-length seqments"
 
   shifted_data = torch.roll(data, shifts=1 if backward else -1, dims=-1)
 
@@ -85,7 +85,9 @@ def _shift_pad_kernel(
   pos_mask = pos_abs < total_len
 
   # O(1) boundary check: load precomputed boolean
-  is_boundary = tl.load(boundary_ptr + pos_abs, mask=pos_mask, other=0).to(tl.int1)
+  is_boundary = tl.load(
+    boundary_ptr + pos_abs, mask=pos_mask, other=0,
+  ).to(tl.int1)
 
   # Compute source position
   if BACKWARD:
@@ -93,7 +95,8 @@ def _shift_pad_kernel(
   else:
     src_pos = pos_abs + 1  # shift left: read from pos+1
 
-  # Clamp source to valid range for the load (boundary positions will be overwritten)
+  # Clamp source to valid range for the load
+  # (boundary positions will be overwritten)
   src_pos_safe = tl.minimum(tl.maximum(src_pos, 0), total_len - 1)
 
   # Load source data
@@ -128,7 +131,8 @@ def shift_pad_compiled(
       data: [C, BL] tensor
       cu_seqlens: [num_seq + 1] cumulative sequence lengths
       pad_value: value for padding (1.0 for gates, 0.0 for states)
-      backward: True = shift right (pad at seq starts), False = shift left (pad at seq ends)
+      backward: True = shift right (pad at seq starts),
+        False = shift left (pad at seq ends)
 
   Returns:
       shifted_data: [C, BL] shifted and padded tensor

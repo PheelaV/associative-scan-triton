@@ -225,13 +225,19 @@ def main():
             dname = DTYPE_NAMES[dtype]
             for pw in pointwise_data:
                 if pw["seqlen"] == pw_seqlen and pw["dtype"] == dname:
-                    positions = np.arange(len(pw["errors"]))
-                    ax.semilogy(positions, pw["errors"],
-                                label=pw["impl"],
-                                color=colors.get(pw["impl"], "gray"),
-                                linewidth=0.6, alpha=0.8)
+                    positions = np.arange(1, len(pw["errors"]) + 1)  # 1-indexed
+                    ax.loglog(positions, pw["errors"],
+                              label=pw["impl"],
+                              color=colors.get(pw["impl"], "gray"),
+                              linewidth=0.6, alpha=0.8)
             ax.set_title(f"{dname} (seqlen={pw_seqlen})")
             ax.set_xlabel("position in sequence")
+            # Power-of-2 ticks on x-axis
+            pw_ticks = [2**i for i in range(0, int(np.log2(pw_seqlen)) + 1)]
+            ax.set_xticks(pw_ticks)
+            ax.set_xticklabels([str(t) for t in pw_ticks], fontsize=7)
+            ax.xaxis.set_minor_locator(plt.NullLocator())
+            ax.set_xlim(0.8, pw_seqlen * 1.2)
             if ax == axes[0]:
                 ax.set_ylabel("absolute error (avg over channels)")
             ax.legend(fontsize=8)
@@ -245,9 +251,13 @@ def main():
         print(f"\nSaved: {plot_path}")
 
         # ---- Plot 2: RMSE vs seqlen, one subplot per dtype ----
+        # Log-log axes with explicit ticks at each tested seqlen.
+        # Diverged points shown as red X markers on the x-axis.
         fig, axes = plt.subplots(1, len(DTYPES), figsize=(5 * len(DTYPES), 4), sharey=False)
         if len(DTYPES) == 1:
             axes = [axes]
+
+        df_div = df[df["status"] == "diverged"].copy()
 
         for ax, dtype in zip(axes, DTYPES):
             dname = DTYPE_NAMES[dtype]
@@ -256,19 +266,37 @@ def main():
                 impl_sub = sub[sub["impl"] == impl_name]
                 if len(impl_sub) == 0:
                     continue
-                ax.semilogy(impl_sub["seqlen"], impl_sub["rmse"],
-                            f'{markers.get(impl_name, "o")}-',
-                            label=impl_name,
-                            color=colors.get(impl_name, "gray"),
-                            linewidth=1.5, markersize=5)
+                ax.loglog(impl_sub["seqlen"], impl_sub["rmse"],
+                          f'{markers.get(impl_name, "o")}-',
+                          label=impl_name,
+                          color=colors.get(impl_name, "gray"),
+                          linewidth=1.5, markersize=5)
+
+                # Mark diverged points for this impl
+                div_sub = df_div[(df_div["dtype"] == dname) & (df_div["impl"] == impl_name)]
+                if len(div_sub) > 0:
+                    for _, row in div_sub.iterrows():
+                        ax.axvline(x=row["seqlen"], color=colors.get(impl_name, "gray"),
+                                   linestyle=":", alpha=0.4, linewidth=1)
+                    # Place a text annotation for the first diverged point
+                    first_div = div_sub.iloc[0]["seqlen"]
+                    ax.annotate(f"{impl_name}\ndiverged",
+                                xy=(first_div, ax.get_ylim()[0] if ax.get_ylim()[0] > 0 else 1e-8),
+                                fontsize=7, color=colors.get(impl_name, "gray"),
+                                ha="center", va="bottom", alpha=0.8)
+
             ax.set_title(dname)
             ax.set_xlabel("sequence length")
+            ax.set_xticks(SEQLENS)
+            ax.set_xticklabels([str(s) for s in SEQLENS], fontsize=7)
+            ax.xaxis.set_minor_locator(plt.NullLocator())
+            ax.set_xlim(SEQLENS[0] * 0.7, SEQLENS[-1] * 1.4)
             if ax == axes[0]:
                 ax.set_ylabel("RMSE vs fp64 gold label")
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
 
-        fig.suptitle("RMSE vs sequential fp64 gold label", fontsize=12)
+        fig.suptitle("RMSE vs sequential fp64 gold label  —  H100 80GB, C=4", fontsize=12)
         fig.tight_layout()
         plot_path = save_path / "accuracy_by_dtype.png"
         fig.savefig(plot_path, dpi=150, bbox_inches="tight")
@@ -276,6 +304,7 @@ def main():
         print(f"Saved: {plot_path}")
 
         # ---- Plot 3: Triton vs warpscan bar chart (RMSE) ----
+        # Shows ALL seqlens. Missing bars = diverged/skipped (annotated).
         if HAS_WARPSCAN:
             fig, axes = plt.subplots(1, len(DTYPES), figsize=(5 * len(DTYPES), 4), sharey=False)
             if len(DTYPES) == 1:
@@ -283,24 +312,29 @@ def main():
 
             for ax, dtype in zip(axes, DTYPES):
                 dname = DTYPE_NAMES[dtype]
-                sub = df_ok[df_ok["dtype"] == dname]
-                triton_sub = sub[sub["impl"] == "triton"].set_index("seqlen")
-                warp_sub = sub[sub["impl"] == "warpscan"].set_index("seqlen")
+                sub_all = df[df["dtype"] == dname]
+                triton_ok = sub_all[(sub_all["impl"] == "triton") & (sub_all["status"] == "ok")].set_index("seqlen")
+                warp_ok = sub_all[(sub_all["impl"] == "warpscan") & (sub_all["status"] == "ok")].set_index("seqlen")
+                warp_div = sub_all[(sub_all["impl"] == "warpscan") & (sub_all["status"] == "diverged")]["seqlen"].tolist()
 
-                common_seqlens = sorted(triton_sub.index.intersection(warp_sub.index))
-                if len(common_seqlens) == 0:
-                    ax.set_title(f"{dname} (no overlap)")
-                    continue
-
-                x = np.arange(len(common_seqlens))
+                x = np.arange(len(SEQLENS))
                 w = 0.35
-                triton_vals = [triton_sub.loc[s, "rmse"] for s in common_seqlens]
-                warp_vals = [warp_sub.loc[s, "rmse"] for s in common_seqlens]
 
-                ax.bar(x - w / 2, triton_vals, w, label="triton", color="#2196F3", alpha=0.8)
-                ax.bar(x + w / 2, warp_vals, w, label="warpscan", color="#FF5722", alpha=0.8)
+                triton_vals = [triton_ok.loc[s, "rmse"] if s in triton_ok.index else 0 for s in SEQLENS]
+                warp_vals = [warp_ok.loc[s, "rmse"] if s in warp_ok.index else 0 for s in SEQLENS]
+
+                bars_t = ax.bar(x - w / 2, triton_vals, w, label="triton", color="#2196F3", alpha=0.8)
+                bars_w = ax.bar(x + w / 2, warp_vals, w, label="warpscan", color="#FF5722", alpha=0.8)
+
+                # Mark diverged warpscan entries
+                for i, s in enumerate(SEQLENS):
+                    if s in warp_div:
+                        ax.text(i + w / 2, ax.get_ylim()[0] if ax.get_ylim()[0] > 0 else 1e-9,
+                                "NaN/\nInf", ha="center", va="bottom", fontsize=6,
+                                color="#FF5722", fontweight="bold")
+
                 ax.set_xticks(x)
-                ax.set_xticklabels([str(s) for s in common_seqlens], fontsize=8)
+                ax.set_xticklabels([str(s) for s in SEQLENS], fontsize=7, rotation=45)
                 ax.set_yscale("log")
                 ax.set_title(dname)
                 ax.set_xlabel("sequence length")
@@ -309,7 +343,7 @@ def main():
                 ax.legend(fontsize=8)
                 ax.grid(True, alpha=0.3, axis="y")
 
-            fig.suptitle("Triton vs warpscan: RMSE comparison", fontsize=12)
+            fig.suptitle("Triton vs warpscan: RMSE comparison  —  H100 80GB, C=4", fontsize=12)
             fig.tight_layout()
             plot_path = save_path / "accuracy_triton_vs_warpscan.png"
             fig.savefig(plot_path, dpi=150, bbox_inches="tight")

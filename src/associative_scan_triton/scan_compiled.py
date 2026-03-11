@@ -5,7 +5,7 @@ through them.
 
 Key changes from the eager path:
 1. kernel[grid](...) -> wrap_triton(kernel)[grid](...)
-2. Non-in-place forward: gates/tokens are read-only, output goes to separate buffer
+2. Non-in-place forward: gates/tokens read-only, output to separate buffer
 3. grad_output.contiguous() in backward (handles broadcast grads from .sum())
 
 IMPORTANT: All wrap_triton kernel calls are inlined directly into the top-level
@@ -15,18 +15,15 @@ operation" errors during AOT autograd tracing.
 """
 
 import torch
-import triton
-import triton.language as tl
 from torch.library import triton_op, wrap_triton
 
+from associative_scan_triton._grid import get_num_stages
 from associative_scan_triton._kernels import (
   backward_scan_fused,
   backward_scan_fused_single_chunk,
   forward_scan_chunked,
   forward_scan_onepass_pipelined,
 )
-from associative_scan_triton._grid import get_num_stages
-
 
 # ============================================================
 # Helper: inline scan (NOT a triton_op — just a plain function)
@@ -42,10 +39,10 @@ def _run_scan(
   chunk_size,
   reverse,
   tokens_out=None,
-):
+) -> None:
   """Run the 1-kernel pipelined scan.
 
-  If tokens_out is provided, writes to it (non-in-place, gates/tokens read-only).
+  If tokens_out is provided, writes to it (non-in-place).
   If tokens_out is None, writes back to tokens (in-place).
 
   This is a plain function (not a triton_op) that calls wrap_triton directly.
@@ -65,7 +62,6 @@ def _run_scan(
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=reverse,
       CHUNK_SIZE=chunk_size,
-      FIRST_CALL=False,
       TESTING=inplace,  # only write gates when in-place (testing mode)
       INPLACE=inplace,
     )
@@ -103,7 +99,8 @@ def scan_causal_fwd_op(
 
   Non-in-place: gates and tokens are read-only.
   Returns: (out_tokens, save_gates)
-  Note: triton_op requires outputs not alias inputs, so gates.clone() is needed here.
+  Note: triton_op requires outputs not alias inputs,
+  so gates.clone() is needed here.
   """
   out_tokens = torch.empty_like(tokens)
 
@@ -119,7 +116,7 @@ def scan_causal_fwd_op(
 def _run_backward(
   grad, gates, states, d_tokens, d_gates,
   cu_seqlens, num_chunks, no_channels, chunk_size, causal,
-):
+) -> None:
   """Run the fused backward scan, dispatching single-chunk vs multi-chunk.
 
   Plain function (not a triton_op) called from within triton_op bodies.
@@ -170,7 +167,11 @@ def scan_causal_bwd_op(
   return d_gates, d_tokens
 
 
-def _scan_causal_backward(ctx, grad, _grad_gates):
+def _scan_causal_backward(
+  ctx, grad, _grad_gates,
+) -> tuple[
+  torch.Tensor, torch.Tensor, None, None, None, None,
+]:
   states, gates = ctx.saved_tensors
   d_gates, d_tokens = scan_causal_bwd_op(
     grad, gates, states,
@@ -183,8 +184,8 @@ def _scan_causal_backward(ctx, grad, _grad_gates):
   )
 
 
-def _scan_causal_setup_context(ctx, inputs, output):
-  gates, tokens, cu_seqlens, num_chunks, no_channels, chunk_size = inputs
+def _scan_causal_setup_context(ctx, inputs, output) -> None:
+  _gates, _tokens, cu_seqlens, num_chunks, no_channels, chunk_size = inputs
   out_tokens, save_gates = output
   ctx.save_for_backward(out_tokens, save_gates)
   ctx.cu_seqlens = cu_seqlens
@@ -219,7 +220,8 @@ def scan_bidi_fwd_op(
 
   Non-in-place: all inputs are read-only.
   Returns: (out_tokens_fwd, out_tokens_bwd, save_gates_fwd, save_gates_bwd)
-  Note: triton_op requires outputs not alias inputs, so gates.clone() is needed here.
+  Note: triton_op requires outputs not alias inputs,
+  so gates.clone() is needed here.
   """
   out_tokens_fwd = torch.empty_like(tokens_fwd)
   out_tokens_bwd = torch.empty_like(tokens_bwd)
@@ -283,8 +285,11 @@ def scan_bidi_bwd_op(
 
 
 def _scan_bidi_backward(
-  ctx, grad_fwd, grad_bwd, _grad_gates_fwd, _grad_gates_bwd
-):
+  ctx, grad_fwd, grad_bwd, _grad_gates_fwd, _grad_gates_bwd,
+) -> tuple[
+  torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+  None, None, None, None,
+]:
   states_fwd, states_bwd, gates_fwd, gates_bwd = ctx.saved_tensors
   d_gates_fwd, d_tokens_fwd, d_gates_bwd, d_tokens_bwd = scan_bidi_bwd_op(
     grad_fwd, grad_bwd,
@@ -299,9 +304,9 @@ def _scan_bidi_backward(
   )
 
 
-def _scan_bidi_setup_context(ctx, inputs, output):
+def _scan_bidi_setup_context(ctx, inputs, output) -> None:
   (
-    gates_fwd, tokens_fwd, gates_bwd, tokens_bwd,
+    _gates_fwd, _tokens_fwd, _gates_bwd, _tokens_bwd,
     cu_seqlens, num_chunks, no_channels, chunk_size,
   ) = inputs
   out_tokens_fwd, out_tokens_bwd, save_gates_fwd, save_gates_bwd = output

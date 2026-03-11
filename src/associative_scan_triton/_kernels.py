@@ -24,50 +24,37 @@ def forward_scan_chunked(
   cu_seqlens_ptr,
   REVERSE: tl.constexpr,
   CHUNK_SIZE: tl.constexpr,
-  FIRST_CALL: tl.constexpr,
   TESTING: tl.constexpr,
   INPLACE: tl.constexpr,
 ) -> None:
-  """
-  Computes a packed and chunked first order recurrence.
+  """Single-chunk forward scan.
 
-  ## parameters
-    - gates_ptr:tensor= gates for in-place update
-    - tokens_ptr:tensor= tokens for in-place update
-    - cu_seqlens_ptr:tensor= cummulative sequelce lengths for packing and varlen
-    - REVERSE:bool= reverse the order of operation (e.g. for gradients)
-    - CHUNK_SIZE:int= size of the chunks, equivalent for all sequences as it is
-        dealt with using chunking
-    - FIRST_CALL:bool= switch between first and second call on the first call
-        - we only update the last chunk states (ports) as to preserve data for
-        the second call where we update all except the ports as they are final
-        already
-        - unless the number of chunks is 1 in which case we simply update all
-    - TESTING:bool used for unit testing, will always write corresponging gates
+  Only used when the entire sequence fits in one chunk.
+  For multi-chunk, see forward_scan_onepass_pipelined.
+
+  Args:
+    - gates_ptr: gate values
+    - tokens_ptr: token values
+    - cu_seqlens_ptr: cumulative sequence lengths (varlen)
+    - REVERSE: reverse scan order
+    - CHUNK_SIZE: chunk size (must be >= max sequence length)
+    - TESTING: if True, write gate values (for gradient checks)
+    - INPLACE: if True, write tokens back to tokens_ptr
   """
   no_sequences = tl.num_programs(0)
-  num_chunks = tl.num_programs(1)
 
   seq_id = tl.program_id(axis=0)
-  chunk_id = tl.program_id(axis=1)
   channel_id = tl.program_id(axis=2)
 
   seq_start = tl.load(cu_seqlens_ptr + seq_id)
   seq_end = tl.load(cu_seqlens_ptr + seq_id + 1)
-  # length of all the sequences to get us to the next channel
   stride_bl = tl.load(cu_seqlens_ptr + no_sequences)
-
-  input_range = tl.arange(0, CHUNK_SIZE)
-  chunk_offset = chunk_id * CHUNK_SIZE
-  if chunk_offset >= seq_end:
-    # return early
-    return
   channel_offset = stride_bl * channel_id
 
+  input_range = tl.arange(0, CHUNK_SIZE)
   seq_range = (
     seq_start
     + ((CHUNK_SIZE - 1 - input_range) if REVERSE else input_range)
-    + chunk_offset
   )
 
   # Create a mask for valid loads and saves overall
@@ -84,19 +71,7 @@ def forward_scan_chunked(
   # Perform scan
   gates, tokens = tl.associative_scan((gates, tokens), axis=0, combine_fn=op)
 
-  # Create a mask for updating the port on the first call, and avoid
-  # updating it on on the second call as it is already final.
-  seq_length = seq_end - seq_start
-  if num_chunks > 1:
-    port_index = (
-      chunk_offset
-      if REVERSE
-      else tl.minimum(seq_length - 1, (chunk_id + 1) * CHUNK_SIZE - 1)
-    )
-    port_mask = seq_range == (seq_start + port_index)
-    # Adjust mask based on whether it's the first or second call
-    mask = mask & (port_mask if FIRST_CALL else ~port_mask)
-  if num_chunks != 1 or TESTING:
+  if TESTING:
     # If we are not aggregating we do not need to updated gates
     tl.store(gates_ptr_chunk_channel, gates, mask=mask)
   if INPLACE:
@@ -156,9 +131,9 @@ def forward_scan_onepass_pipelined(
     )
     mask = seq_end > seq_range
 
-    # Load (2 reads — pipelining prefetches these from next iteration)
-    # Cast to fp32 for scan accumulation (matches prefix_gate/prefix_token dtype,
-    # prevents type mismatch in the if/else branch below for fp16/bf16 inputs)
+    # Load (2 reads — pipelining prefetches next iteration)
+    # Cast to fp32 for scan accumulation (matches prefix dtype,
+    # prevents type mismatch in if/else for fp16/bf16 inputs)
     gates_ptrs = gates_ptr + seq_range + channel_offset
     tokens_ptrs = tokens_ptr + seq_range + channel_offset
     gates = tl.load(gates_ptrs, mask=mask, other=1.0).to(tl.float32)
@@ -248,10 +223,13 @@ def backward_scan_fused(
       seq_range = seq_start + input_range + chunk_offset
     mask = seq_end > seq_range
 
-    # Load grad (no shift) — cast to fp32 for scan accumulation
-    grad_vals = tl.load(grad_ptr + seq_range + channel_offset, mask=mask, other=0.0).to(tl.float32)
+    # Load grad (no shift) — upcast to fp32 for accumulation
+    grad_vals = tl.load(
+      grad_ptr + seq_range + channel_offset,
+      mask=mask, other=0.0,
+    ).to(tl.float32)
 
-    # Load shifted gates (inline shift_pad) — cast to fp32 for scan accumulation
+    # Load shifted gates (inline shift_pad) — upcast to fp32
     if CAUSAL:
       shifted_gate_pos = seq_range + 1
       gate_boundary = shifted_gate_pos >= seq_end
@@ -259,7 +237,9 @@ def backward_scan_fused(
       shifted_gate_pos = seq_range - 1
       gate_boundary = shifted_gate_pos < seq_start
 
-    shifted_gate_pos_safe = tl.minimum(tl.maximum(shifted_gate_pos, seq_start), seq_end - 1)
+    shifted_gate_pos_safe = tl.minimum(
+      tl.maximum(shifted_gate_pos, seq_start), seq_end - 1,
+    )
     shifted_gates = tl.load(
       gates_ptr + shifted_gate_pos_safe + channel_offset,
       mask=mask & ~gate_boundary, other=1.0,
@@ -283,7 +263,7 @@ def backward_scan_fused(
     prefix_gate = tl.sum(shifted_gates * last_mask)
     prefix_token = tl.sum(d_tokens * last_mask)
 
-    # Load shifted states and compute d_gates (inline shift_pad + fused multiply)
+    # Load shifted states, compute d_gates (shift_pad + multiply)
     if CAUSAL:
       shifted_state_pos = seq_range - 1
       state_boundary = shifted_state_pos < seq_start
@@ -291,7 +271,9 @@ def backward_scan_fused(
       shifted_state_pos = seq_range + 1
       state_boundary = shifted_state_pos >= seq_end
 
-    shifted_state_pos_safe = tl.minimum(tl.maximum(shifted_state_pos, seq_start), seq_end - 1)
+    shifted_state_pos_safe = tl.minimum(
+      tl.maximum(shifted_state_pos, seq_start), seq_end - 1,
+    )
     shifted_states = tl.load(
       states_ptr + shifted_state_pos_safe + channel_offset,
       mask=mask & ~state_boundary, other=0.0,
@@ -339,7 +321,10 @@ def backward_scan_fused_single_chunk(
   mask = seq_end > seq_range
 
   # Load grad (no shift)
-  grad_vals = tl.load(grad_ptr + seq_range + channel_offset, mask=mask, other=0.0)
+  grad_vals = tl.load(
+    grad_ptr + seq_range + channel_offset,
+    mask=mask, other=0.0,
+  )
 
   # Load shifted gates (inline shift_pad)
   if CAUSAL:
@@ -349,7 +334,9 @@ def backward_scan_fused_single_chunk(
     shifted_gate_pos = seq_range - 1
     gate_boundary = shifted_gate_pos < seq_start
 
-  shifted_gate_pos_safe = tl.minimum(tl.maximum(shifted_gate_pos, seq_start), seq_end - 1)
+  shifted_gate_pos_safe = tl.minimum(
+    tl.maximum(shifted_gate_pos, seq_start), seq_end - 1,
+  )
   shifted_gates = tl.load(
     gates_ptr + shifted_gate_pos_safe + channel_offset,
     mask=mask & ~gate_boundary, other=1.0,
@@ -369,12 +356,16 @@ def backward_scan_fused_single_chunk(
     shifted_state_pos = seq_range + 1
     state_boundary = shifted_state_pos >= seq_end
 
-  shifted_state_pos_safe = tl.minimum(tl.maximum(shifted_state_pos, seq_start), seq_end - 1)
+  shifted_state_pos_safe = tl.minimum(
+    tl.maximum(shifted_state_pos, seq_start), seq_end - 1,
+  )
   shifted_states = tl.load(
     states_ptr + shifted_state_pos_safe + channel_offset,
     mask=mask & ~state_boundary, other=0.0,
   )
-  shifted_states = tl.where(state_boundary & mask, 0.0, shifted_states)
+  shifted_states = tl.where(
+    state_boundary & mask, 0.0, shifted_states,
+  )
 
   d_gates = shifted_states * d_tokens
 

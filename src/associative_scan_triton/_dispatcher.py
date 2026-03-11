@@ -1,12 +1,12 @@
 import triton.language as tl
 
+from associative_scan_triton._grid import get_num_stages
 from associative_scan_triton._kernels import (
   backward_scan_fused,
   backward_scan_fused_single_chunk,
   forward_scan_chunked,
   forward_scan_onepass_pipelined,
 )
-from associative_scan_triton._grid import get_num_stages
 
 
 def forward_scan_full(
@@ -44,7 +44,6 @@ def forward_scan_full(
       cu_seqlens_ptr=cu_seqlens,
       REVERSE=REVERSE,
       CHUNK_SIZE=CHUNK_SIZE,
-      FIRST_CALL=False,
       TESTING=TESTING,
       INPLACE=inplace,
     )

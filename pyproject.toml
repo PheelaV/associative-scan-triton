@@ -1,6 +1,6 @@
 [project]
 name = "associative-scan-triton"
-version = "0.1.0"
+version = "1.0.0"
 description = "Chunked associative scan (first-order linear recurrence) in Triton with varlen/packing, bidirectional, and torch.compile support"
 readme = "README.md"
 authors = [
@@ -16,6 +16,104 @@ dependencies = [
 requires = ["uv_build>=0.9.9,<0.10.0"]
 build-backend = "uv_build"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# https://docs.astral.sh/ruff/settings/
+[tool.ruff]
+indent-width = 2
+line-length = 79
+lint.select = ["ALL"]
+lint.ignore = [
+    "ANN001",       # missing-type-function-argument
+    "ANN204",       # missing return type for `__init__`
+    "ANN401",       # dynamically typed expressions (typing.Any) disallowed
+    "ARG001",       # unused-function-argument
+    "COM812",       # trailing comma missing
+    "D100",         # missing docstring in public module
+    "D102",         # missing docstring in public method
+    "D103",         # missing docstring in public function
+    "E741",         # ambiguous variable name
+    "EM101",        # exception must not use a string literal
+    "EM102",        # exception must not use an f-string literal
+    "ERA001",       # commented out code
+    "F722",         # syntax error in forward annotation (false positives with jaxtyping)
+    "FA100",        # missing `from __future__ import annotations`
+    "FA102",        # missing `from __future__ import annotations`
+    "FBT001",       # boolean-typed positional argument
+    "FBT002",       # boolean default positional argument
+    "FBT003",       # boolean positional value in function call
+    "FIX002",       # line contains TODO
+    "INP001",       # implicit namespace package
+    "PLR0913",      # too many arguments in function definition
+    "PLR2004",      # magic value used in comparison
+    "RET504",       # unnecessary assignment before return
+    "RET505",       # unnecessary else after return
+    "S101",         # use of assert detected
+    "SIM108",       # use ternary operator
+    "T201",         # print statement
+    "TD003",        # missing issue link for TODO
+    "TRY003",       # long messages outside exception class
+    "N803",         # argument name should be lowercase (Triton constexpr convention)
+    "N806",         # variable in function should be lowercase
+    "EXE002",       # executable but no shebang
+    "ISC001",       # conflicts with formatter
+]
+
+exclude = [".venv", "**/__init__.py", "MY_LOCAL*", "workbench/*"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Triton JIT kernels can't have Python return type annotations
+"*/_kernels.py" = ["ANN202", "PLR0915", "D417"]
+"*/_shift_pad.py" = ["ANN202"]
+"*/_dispatcher.py" = ["D417"]
+"*test*.py" = [
+    "ANN201",       # missing return type for public function
+    "ANN202",       # missing return type for private function
+    "D101",         # missing docstring in public class
+    "D107",         # missing docstring in __init__
+    "PT009",        # use regular assert instead of unittest-style
+    "SLF001",       # private member accessed
+    "PLC0415",      # import should be at top-level
+]
+"bench/*.py" = [
+    "ANN201",       # missing return type for public function
+    "ANN202",       # missing return type for private function
+    "D101",         # missing docstring in public class
+    "D107",         # missing docstring in __init__
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+quote-style = "double"
+
+# https://docs.astral.sh/ty/configuration/
+# Triton JIT kernels use tl.constexpr / tl.float32 as type annotations —
+# not valid Python types, but standard Triton conventions.
+[[tool.ty.overrides]]
+include = ["src/associative_scan_triton/_kernels.py"]
+[tool.ty.overrides.rules]
+invalid-type-form = "ignore"       # tl.float32 variable annotations
+invalid-parameter-default = "ignore"  # tl.constexpr defaults
+invalid-argument-type = "ignore"   # tl.constexpr arguments
+
+[[tool.ty.overrides]]
+include = ["src/associative_scan_triton/_dispatcher.py"]
+[tool.ty.overrides.rules]
+invalid-parameter-default = "ignore"
+invalid-argument-type = "ignore"
+
+# torch.autograd.Function.backward intentionally narrows the base
+# class signature (fixed args instead of *grad_outputs).
+[[tool.ty.overrides]]
+include = ["src/associative_scan_triton/scan_eager.py"]
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"   # calls dispatcher with tl.constexpr params
+invalid-method-override = "ignore" # autograd.Function.backward signatures
+
 [dependency-groups]
 bench = [
     "accelerated-scan>=0.3.1",
@@ -28,4 +126,6 @@ dev = [
     "numpy>=2.2.6",
     "pytest>=9.0.2",
     "pytest-mock>=3.15.1",
+    "ruff>=0.15.5",
+    "ty>=0.0.21",
 ]

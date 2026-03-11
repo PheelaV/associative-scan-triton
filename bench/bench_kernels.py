@@ -43,7 +43,25 @@ B = 8
 C = 1536
 MAX_CHUNK_SIZE = 512
 DEVICE = "cuda"
-SEQLENS = [2**i for i in range(7, 17)]  # 128..65536, all pow2 for warpscan
+_ALL_SEQLENS = [2**i for i in range(7, 17)]  # 128..65536, all pow2 for warpscan
+
+
+def _max_seqlen_for(num_tensors, dtype_bytes=4, margin_gb=1.5):
+  """Return the largest power-of-2 seqlen that fits in GPU VRAM."""
+  import math
+  total = torch.cuda.get_device_properties(0).total_memory
+  usable = total - margin_gb * 2**30
+  max_elems = usable / (num_tensors * C * B * dtype_bytes)
+  return 2 ** int(math.log2(max(max_elems, 128)))
+
+
+# Forward: 3 tensors (gates, tokens, out)
+# Backward: 6 tensors (gates, tokens, out, grad, d_tokens, d_gates)
+SEQLENS_FWD = [s for s in _ALL_SEQLENS if s <= _max_seqlen_for(3)]
+SEQLENS_BWD = [s for s in _ALL_SEQLENS if s <= _max_seqlen_for(6)]
+print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GB")
+print(f"  fwd seqlens: {SEQLENS_FWD[0]}..{SEQLENS_FWD[-1]} ({len(SEQLENS_FWD)} points)")
+print(f"  bwd seqlens: {SEQLENS_BWD[0]}..{SEQLENS_BWD[-1]} ({len(SEQLENS_BWD)} points)")
 
 
 # ============================================================
@@ -76,7 +94,7 @@ def _make_direct_fwd_fn(gates, tokens, out, cu_seqlens, chunk_size, grid):
       forward_scan_chunked[grid](
         gates_ptr=gates, tokens_ptr=tokens, tokens_out_ptr=out,
         cu_seqlens_ptr=cu_seqlens,
-        REVERSE=False, CHUNK_SIZE=chunk_size, FIRST_CALL=False,
+        REVERSE=False, CHUNK_SIZE=chunk_size,
         TESTING=False, INPLACE=False,
       )
   else:
@@ -131,7 +149,7 @@ if HAS_WARPSCAN:
   [
     triton.testing.Benchmark(
       x_names=["seqlen"],
-      x_vals=SEQLENS,
+      x_vals=SEQLENS_FWD,
       xlabel="sequence length",
       ylabel="ms",
       x_log=True,
@@ -181,7 +199,7 @@ if HAS_WARPSCAN:
   [
     triton.testing.Benchmark(
       x_names=["seqlen"],
-      x_vals=SEQLENS,
+      x_vals=SEQLENS_BWD,
       xlabel="sequence length",
       ylabel="ms",
       x_log=True,
@@ -242,7 +260,7 @@ if HAS_WARPSCAN:
   [
     triton.testing.Benchmark(
       x_names=["seqlen"],
-      x_vals=SEQLENS,
+      x_vals=SEQLENS_BWD,
       xlabel="sequence length",
       ylabel="ms",
       x_log=True,

@@ -1,5 +1,7 @@
 # Associative Scan: Triton vs CUDA — A Deep Technical Comparison
 
+This is a claude-code driven analysis, beware.
+
 *How two implementations of the same algorithm produce different performance profiles, and why the gap exists.*
 
 ## The problem
@@ -20,7 +22,7 @@ Both implementations are based on the **parallel prefix sum** (associative scan)
 
 - **Blelloch (1990)** [[2]](#references): A work-efficient exclusive scan with O(N) work and O(log N) depth. Uses an up-sweep (reduce) phase followed by a down-sweep (distribute) phase. Better total work, but requires two passes and more synchronization.
 
-In practice, modern GPU implementations use **neither algorithm in pure form** — they combine elements of both with hardware-specific optimizations (warp shuffles, shared memory, thread coarsening). The backward scan for the linear recurrence uses the padded reverse scan technique from Martin & Cundy (2017) [[3]](#references).
+In practice, modern GPU implementations use **neither algorithm in pure form** — they combine elements of both with hardware-specific optimizations (warp shuffles, shared memory, thread coarsening). Both implementations described below are hybrids: Triton uses Hillis-Steele within warps but reduction+broadcast across warps; warpscan uses Blelloch-style thread coarsening with Hillis-Steele warp-level scans. The backward scan for the linear recurrence uses the padded reverse scan technique from Martin & Cundy (2017) [[3]](#references).
 
 ---
 
@@ -47,11 +49,11 @@ The key parameter is `sizePerThread = [1]` — **each thread owns exactly one el
 
 ### What the compiled scan actually does
 
-Triton's warp-level scan follows the **Hillis-Steele** [[1]](#references) pattern: each thread combines with progressively distant neighbors in a single forward pass. This is work-inefficient (O(N log N) total operations) but has minimal depth (O(log N) steps), which maps well to GPU warps where all 32 threads execute in lockstep.
+The compiled scan uses a two-level hybrid approach:
 
 For a 512-element scan with 4 warps (128 threads), each thread handles 4 elements across 4 rounds. Each round processes one "slice" of the scan tree:
 
-**Within-warp phase** (per round):
+**Within-warp phase** (per round) — **Hillis-Steele** [[1]](#references):
 1. Each thread holds one element
 2. `SHFL.UP` with delta 1: combine with neighbor
 3. `SHFL.UP` with delta 2: combine with 2-away
@@ -61,11 +63,14 @@ For a 512-element scan with 4 warps (128 threads), each thread handles 4 element
 
 That's 5 shuffle levels per round, 2 values (gate + token) per shuffle = **10 shuffles per warp per round**.
 
-**Cross-warp phase** (between rounds):
-1. Last thread of each warp stores its result to shared memory (`STS`)
+**Cross-warp phase** (between rounds) — **reduction + broadcast**:
+1. Last thread of each warp (thread 31) stores its result to shared memory (`STS`)
 2. Barrier (`BAR.SYNC`)
-3. Each warp loads the previous warp's result from shared memory (`LDS`)
-4. Combine with its own first element
+3. All threads load the warp-boundary values from shared memory (`LDS`)
+4. Mini Hillis-Steele scan on just the boundary values (4 elements for 4 warps)
+5. Each warp applies its exclusive prefix to all its elements (broadcast multiply+FMA)
+
+This is *not* a pure Hillis-Steele scan across all 128 threads — the cross-warp level extracts warp boundaries, scans them, and broadcasts the result back. This is more efficient than full Hillis-Steele at 128 threads would be (2 shuffle levels on 4 boundaries vs 7 shuffle levels on 128 elements).
 
 For CHUNK_SIZE=512, 4 warps, this produces (from actual SASS inspection):
 
@@ -222,6 +227,8 @@ On the backward pass, the gap narrows from ~14% to ~4-7% at large sequence lengt
 
 **Key discovery**: IR analysis confirmed that the axis=1 scan with COARSEN=2 or 4 compiles to **zero shuffles and zero barriers** — genuine register-level thread coarsening! With COARSEN=4, total shuffles dropped from 48 to 12 (4x fewer).
 
+*Caveat*: The zero-shuffle behavior depends on Triton's tensor layout propagation not inserting a `convert_layout` op between the reshape and scan. This is not a compiler guarantee — it holds for the minimal reshape→scan→store pattern but can break if surrounding operations (masking, broadcasting, reductions) require a different layout. Verified on Triton 3.6.0; behavior may change across versions.
+
 | Variant | SHFL | BAR | Regs |
 |---------|------|-----|------|
 | 1D flat (N=512) | 48 | 1 | 23 |
@@ -281,6 +288,24 @@ H100 80GB, B=8, C=1536, direct kernel calls, CUDA event timing.
 
 Crossover point: seqlen ~2048-4096 for fwd+bwd combined.
 
+### RTX 3080 Ti 12GB (Ampere)
+
+Same config (B=8, C=1536), direct kernel calls, CUDA event timing. Bwd/fwd+bwd capped at seqlen=32768 due to 12GB VRAM.
+
+| seqlen | Triton (ms) | warpscan (ms) | ratio |
+|-------:|------------:|--------------:|------:|
+| 128 | 0.069 | 0.068 | 0.99x |
+| 256 | 0.130 | 0.129 | 1.00x |
+| 512 | 0.251 | 0.248 | 0.99x |
+| 1024 | 0.499 | 0.496 | 0.99x |
+| 2048 | 0.991 | 0.990 | 1.00x |
+| 4096 | 1.974 | 1.960 | 0.99x |
+| 8192 | 3.944 | 3.931 | 1.00x |
+| 16384 | 7.894 | 7.832 | 0.99x |
+| 32768 | 15.796 | 15.685 | 0.99x |
+
+On Ampere, the implementations are **essentially tied** — the Triton compiler limitations that cause the 7-10% gap on Hopper (`sizePerThread=1`, no vectorized loads) do not manifest on this architecture.
+
 ---
 
 ## When to use which
@@ -294,12 +319,12 @@ Crossover point: seqlen ~2048-4096 for fwd+bwd combined.
 - Prioritizing maintainability — Python/Triton kernel vs CUDA C++ with 16 hand-tuned configurations
 
 **Use warpscan when:**
-- Training with fixed, long sequence lengths (>= 4096) where the ~7-10% fwd+bwd gap matters
+- Training on Hopper (H100) with fixed, long sequence lengths (>= 4096) where the ~7-10% fwd+bwd gap matters
 - All sequences are the same length and power-of-2 (no packing benefit)
 - Not using `torch.compile`
 - Maximum raw kernel throughput is the only concern
 
-**In practice**, for most gated linear RNN training workloads (seqlen 512-2048, variable-length documents, compiled training loops), the Triton implementation is the better choice. The feature advantages (packing, compile, bidirectional) compound — packing alone can save 10-40% of wasted compute on variable-length data, which far exceeds the 7-10% kernel-level gap at long sequences.
+**In practice**, for most gated linear RNN training workloads (seqlen 512-2048, variable-length documents, compiled training loops), the Triton implementation is the better choice. The feature advantages (packing, compile, bidirectional) compound — packing alone can save 10-40% of wasted compute on variable-length data, which far exceeds the 7-10% kernel-level gap at long sequences on Hopper. On Ampere (3080 Ti), there is no kernel-level performance gap at all.
 
 ---
 

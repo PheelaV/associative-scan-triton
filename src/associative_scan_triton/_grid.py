@@ -1,4 +1,3 @@
-import torch
 
 
 # source: https://github.com/triton-lang/triton/blob/6ddb79b47f3fc07038f09eb96bb0011e6725c8ee/python/triton/__init__.py#L63

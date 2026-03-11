@@ -1,6 +1,6 @@
 """Chunked associative scan in Triton with varlen/packing, bidirectional, and torch.compile support."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 # Core kernels and dispatcher
 from associative_scan_triton._kernels import op, forward_scan_chunked, forward_scan_onepass_pipelined, backward_scan_fused, backward_scan_fused_single_chunk

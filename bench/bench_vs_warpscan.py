@@ -33,13 +33,63 @@ max_chunk_size = 512
 device = "cuda"
 
 
+def _max_seqlen_for(num_tensors, dtype_bytes=4, margin_gb=1.5):
+  """Return the largest power-of-2 seqlen that fits in GPU VRAM."""
+  import math
+  total = torch.cuda.get_device_properties(0).total_memory
+  usable = total - margin_gb * 2**30
+  max_elems = usable / (num_tensors * C * B * dtype_bytes)
+  return 2 ** int(math.log2(max(max_elems, 128)))
+
+
+_ALL_SEQLENS = [2**i for i in range(7, 17)]
+# API-level needs more margin than kernel-level due to autograd + allocator fragmentation
+# Forward: ~4 tensors (gates, tokens, output, + residual from prior provider)
+# Fwd+bwd with autograd: ~8 tensors (+ clones, grads, autograd graph)
+SEQLENS_FWD = [s for s in _ALL_SEQLENS if s <= _max_seqlen_for(4)]
+SEQLENS_BWD = [s for s in _ALL_SEQLENS if s <= _max_seqlen_for(8)]
+print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GB")
+print(f"  fwd seqlens: {SEQLENS_FWD[0]}..{SEQLENS_FWD[-1]} ({len(SEQLENS_FWD)} points)")
+print(f"  bwd seqlens: {SEQLENS_BWD[0]}..{SEQLENS_BWD[-1]} ({len(SEQLENS_BWD)} points)")
+
+
 def _make_data(seqlen):
   """Create packed mock data: C channels, B equal-length sequences."""
   total = seqlen * B
   gates = torch.rand(C, total, device=device).contiguous()
   tokens = torch.rand(C, total, device=device).contiguous()
-  cu_seqlens = torch.arange(0, B + 1, device=device, dtype=torch.int32) * seqlen
+  cu_seqlens = torch.arange(
+    0, B + 1, device=device, dtype=torch.int32,
+  ) * seqlen
   return gates, tokens, cu_seqlens
+
+
+# ============================================================
+# Global warmup: JIT-compile all Triton kernels before timing
+# ============================================================
+
+def _warmup_all():
+  """Pre-compile Triton kernels for all seqlens to avoid JIT in benchmarks."""
+  seqlens = SEQLENS_BWD  # warmup does fwd+bwd, use the restricted list
+  for sl in seqlens:
+    gates, tokens, cu_seqlens = _make_data(sl)
+    cs = min(next_power_of_2(sl), max_chunk_size)
+    grid = get_grid(len(cu_seqlens), sl, cs, C)
+    args = {"cu_seqlens": cu_seqlens, "chunk_size": cs, "grid": grid}
+    # Eager forward + backward (triggers Triton JIT)
+    g = gates.clone().requires_grad_(True)
+    t = tokens.clone().requires_grad_(True)
+    out = scan_causal(g, t, args)
+    out.sum().backward()
+    # Compiled forward + backward
+    g = gates.clone().requires_grad_(True)
+    t = tokens.clone().requires_grad_(True)
+    out = _scan_causal_torch_compiled(g, t, args)
+    out.sum().backward()
+  torch.cuda.synchronize()
+  print("Global warmup done (all kernels JIT-compiled)")
+
+_warmup_all()
 
 
 # ============================================================
@@ -56,7 +106,7 @@ if HAS_WARPSCAN:
   [
     triton.testing.Benchmark(
       x_names=["seqlen"],
-      x_vals=[2**i for i in range(7, 18)],
+      x_vals=SEQLENS_FWD,
       xlabel="sequence length",
       ylabel="ms",
       x_log=True,
@@ -87,9 +137,9 @@ def bench_fwd(provider, seqlen, device=device):
     gates, tokens, cu_seqlens = _make_data(seqlen)
     chunk_size = min(next_power_of_2(seqlen), max_chunk_size)
     grid = get_grid(len(cu_seqlens), seqlen, chunk_size, C)
+    args = {"cu_seqlens": cu_seqlens, "chunk_size": chunk_size, "grid": grid}
 
     if provider == "triton_compiled":
-      args = {"cu_seqlens": cu_seqlens, "chunk_size": chunk_size, "grid": grid}
       # Warmup torch.compile (first call triggers compilation)
       _scan_causal_torch_compiled(gates, tokens, args)
 
@@ -97,14 +147,8 @@ def bench_fwd(provider, seqlen, device=device):
         return _scan_causal_torch_compiled(gates, tokens, args)
 
     else:
-      out_tokens = torch.empty_like(tokens)
-
       def subject():
-        return forward_scan_full(
-          gates, tokens, cu_seqlens, grid,
-          REVERSE=False, CHUNK_SIZE=chunk_size, TESTING=False,
-          tokens_out=out_tokens,
-        )
+        return scan_causal(gates, tokens, args)
 
   with torch.inference_mode():
     ms = triton.testing.do_bench(subject, warmup=5000, rep=100)
@@ -126,7 +170,7 @@ if HAS_WARPSCAN:
   [
     triton.testing.Benchmark(
       x_names=["seqlen"],
-      x_vals=[2**i for i in range(7, 18)],
+      x_vals=SEQLENS_BWD,
       xlabel="sequence length",
       ylabel="ms",
       x_log=True,
@@ -164,6 +208,13 @@ def bench_fwdbwd(provider, seqlen, device=device):
     args = {"cu_seqlens": cu_seqlens, "chunk_size": chunk_size, "grid": grid}
     scan_fn = _scan_causal_torch_compiled if provider == "triton_compiled" else scan_causal
 
+    if provider == "triton_compiled":
+      # Warmup torch.compile (triggers compilation for this seqlen)
+      g = gates_src.clone().requires_grad_(True)
+      t = tokens_src.clone().requires_grad_(True)
+      out = scan_fn(g, t, args)
+      out.sum().backward()
+
     def subject():
       g = gates_src.clone().requires_grad_(True)
       t = tokens_src.clone().requires_grad_(True)
@@ -185,6 +236,7 @@ def plot_with_speedup(csv_path, save_path):
   import numpy as np
   import pandas as pd
   import matplotlib.pyplot as plt
+  from matplotlib.ticker import NullLocator
 
   df = pd.read_csv(csv_path)
   cols = df.columns.tolist()
@@ -212,17 +264,23 @@ def plot_with_speedup(csv_path, save_path):
   ax1.set_ylabel('ms')
   ax1.legend(loc='upper left')
   ax1.grid(True, alpha=0.3)
+  # Power-of-2 x-axis ticks (data points are powers of 2)
+  ax1.set_xticks(seqlens[~np.isnan(seqlens)])
+  ax1.set_xticklabels(
+    [str(int(s)) for s in seqlens if not np.isnan(s)], fontsize=7,
+  )
+  ax1.xaxis.set_minor_locator(NullLocator())
 
-  # Secondary axis: speedup ratio (warp / our best)
-  if warp_col and (eager_col or compiled_col):
+  # Secondary axis: speedup ratio (warp / eager)
+  # Compare against eager since warpscan doesn't support torch.compile
+  if warp_col and eager_col:
     ax2 = ax1.twinx()
     warp = df[warp_col].values
     mask = ~np.isnan(warp)
-    # Use compiled if available, else eager
-    best_col = compiled_col or eager_col
-    best = df[best_col].values
-    speedup = warp[mask] / best[mask]
-    ax2.plot(seqlens[mask], speedup, 'd--', label=f'speedup (warp / {"compiled" if compiled_col else "eager"})',
+    eager = df[eager_col].values
+    speedup = warp[mask] / eager[mask]
+    ax2.plot(seqlens[mask], speedup, 'd--',
+             label='speedup (warp / eager)',
              color='#4CAF50', linewidth=1.5, alpha=0.7)
     ax2.set_ylabel('speedup ratio', color='#4CAF50')
     ax2.tick_params(axis='y', labelcolor='#4CAF50')
@@ -260,11 +318,6 @@ if __name__ == "__main__":
   for csv_file in save_path.glob("*.csv"):
     plot_with_speedup(csv_file, save_path)
 
-  # Copy the forward benchmark plot to docs/ for README
-  import shutil
-  docs_path = Path("docs")
-  docs_path.mkdir(exist_ok=True)
-  fwd_plot = save_path / f"Scan fwd: ({B}, {C}, seqlen), inference mode.png"
-  if fwd_plot.exists():
-    shutil.copy(fwd_plot, docs_path / "h100_scan_benchmark.png")
-    print(f"Copied forward benchmark plot to {docs_path / 'h100_scan_benchmark.png'}")
+  # NOTE: This is an API-level benchmark (includes Python wrapper
+  # overhead). For kernel-vs-kernel comparison, use bench_kernels.py
+  # which produces the README graph (docs/h100_kernel_benchmark.png).

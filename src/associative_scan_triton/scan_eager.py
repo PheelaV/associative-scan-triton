@@ -7,8 +7,10 @@ Contains:
 
 import torch
 
-from associative_scan_triton._dispatcher import backward_scan_fused_full, forward_scan_full
-
+from associative_scan_triton._dispatcher import (
+  backward_scan_fused_full,
+  forward_scan_full,
+)
 
 # ============================================================
 # Causal (unidirectional) scan
@@ -19,7 +21,7 @@ class ScanCausal(torch.autograd.Function):
   """Causal (unidirectional) associative scan with autograd."""
 
   @staticmethod
-  def forward(ctx, gates, tokens, args):
+  def forward(ctx, gates, tokens, args) -> torch.Tensor:
     shape = gates.shape
     assert tokens.shape == shape
     assert gates.is_contiguous()
@@ -46,7 +48,9 @@ class ScanCausal(torch.autograd.Function):
     return out_tokens
 
   @staticmethod
-  def backward(ctx, grad_output):
+  def backward(
+    ctx, grad_output,
+  ) -> tuple[torch.Tensor, torch.Tensor, None]:
     grid = ctx.grid
     states, gates = ctx.saved_tensors
     cu_seqlens = ctx.cu_seqlens
@@ -91,8 +95,8 @@ class ScanBidirectionalBranched(torch.autograd.Function):
 
   @staticmethod
   def forward(
-    ctx, gates_fwd, tokens_fwd, gates_bwd, tokens_bwd, args, testing=False
-  ):
+    ctx, gates_fwd, tokens_fwd, gates_bwd, tokens_bwd, args, testing=False,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     shape = gates_fwd.shape
     assert tokens_fwd.shape == shape
     assert tokens_bwd.shape == shape
@@ -138,7 +142,11 @@ class ScanBidirectionalBranched(torch.autograd.Function):
     return out_tokens_fwd, out_tokens_bwd
 
   @staticmethod
-  def backward(ctx, grad_output_fwd, grad_output_bwd):
+  def backward(
+    ctx, grad_output_fwd, grad_output_bwd,
+  ) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None, None,
+  ]:
     grid = ctx.grid
     states_fwd, states_bwd, gates_fwd, gates_bwd = ctx.saved_tensors
     cu_seqlens = ctx.cu_seqlens
@@ -191,7 +199,8 @@ def scan_bidirectional_branched(
       - "cu_seqlens": [B+1] cumulative sequence lengths
       - "chunk_size": int, scan chunk size
       - "grid": tuple (num_seq, num_chunks, no_channels)
-    testing: if True, write gate values during scan (needed for gradient checks)
+    testing: if True, write gate values during scan
+      (needed for gradient checks)
 
   Returns:
     (scanned_tokens_fwd, scanned_tokens_bwd)

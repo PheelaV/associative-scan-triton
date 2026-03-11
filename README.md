@@ -75,11 +75,66 @@ Requires PyTorch >= 2.10 and Triton >= 3.6 (ships with recent PyTorch).
 
 ## performance
 
-Kernel-vs-kernel benchmark on H100 80GB, `(B=8, C=1536, seqlen)`. Direct kernel calls, no autograd overhead on either side. Compared against [accelerated-scan](https://github.com/proger/accelerated-scan) (hand-tuned CUDA warp-level implementation). Timed with `triton.testing.do_bench()` (CUDA events, L2 cache cleared between reps).
+Benchmarks on H100 80GB and RTX 3080 Ti 12GB, `(B=8, C=1536, seqlen)`, compared against [accelerated-scan](https://github.com/proger/accelerated-scan) (hand-tuned CUDA warp-level implementation). Timed with `triton.testing.do_bench()` (CUDA events, L2 cache cleared between reps).
+
+### PyTorch API
+
+Measured through the PyTorch API — `scan_causal()` vs `warp_scan()` — including autograd, input validation, and dispatch overhead.
+
+![API fwd benchmark on H100 80GB](docs/h100_api_fwd_benchmark.png)
+
+**Forward-only (inference)**: Consistently faster at all sequence lengths (~10-15%).
+
+![API fwd+bwd benchmark on H100 80GB](docs/h100_api_fwdbwd_benchmark.png)
+
+**Fwd+bwd (training)**:
+
+| seqlen | ours (ms) | warpscan (ms) | speedup |
+|-------:|----------:|--------------:|--------:|
+| 128 | 0.143 | **0.108** | 0.75x |
+| 256 | 0.136 | **0.120** | 0.89x |
+| 512 | 0.152 | 0.186 | **1.22x** |
+| 1024 | 0.300 | 0.307 | **1.02x** |
+| 2048 | 0.555 | 0.599 | **1.08x** |
+| 4096 | 1.069 | 1.081 | **1.01x** |
+| 8192 | 2.070 | 2.120 | **1.02x** |
+| 16384 | 4.087 | 4.193 | **1.03x** |
+| 32768 | 8.126 | 8.359 | **1.03x** |
+| 65536 | 16.238 | 16.724 | **1.03x** |
+
+At small seqlens (128-256), warpscan's lighter autograd path wins. At seqlen >= 512, we're faster or equal. The `_compiled` variants (`@triton_op`) exist for `torch.compile` compatibility — so the scan doesn't cause a graph break when the outer model is compiled. They run the same kernels.
+
+<details>
+<summary><b>RTX 3080 Ti 12GB</b> (Ampere)</summary>
+
+![API fwd benchmark on 3080 Ti](docs/3080ti_api_fwd_benchmark.png)
+
+**Forward-only (inference)**: ~30% faster than warpscan across all sequence lengths.
+
+![API fwd+bwd benchmark on 3080 Ti](docs/3080ti_api_fwdbwd_benchmark.png)
+
+**Fwd+bwd (training)**: Consistently ~6% faster at all seqlens (no small-seqlen penalty seen on H100):
+
+| seqlen | ours (ms) | warpscan (ms) | speedup |
+|-------:|----------:|--------------:|--------:|
+| 128 | 0.128 | 0.134 | **1.05x** |
+| 256 | 0.237 | 0.250 | **1.06x** |
+| 512 | 0.448 | 0.476 | **1.06x** |
+| 1024 | 0.876 | 0.932 | **1.06x** |
+| 2048 | 1.730 | 1.841 | **1.06x** |
+| 4096 | 3.434 | 3.648 | **1.06x** |
+| 8192 | 6.846 | 7.328 | **1.07x** |
+| 16384 | 13.674 | 14.549 | **1.06x** |
+
+</details>
+
+### Kernel-level
+
+Direct kernel calls, no autograd overhead on either side.
 
 ![Kernel benchmark on H100 80GB](docs/h100_kernel_benchmark.png)
 
-### Fwd+Bwd combined (training pass)
+#### Fwd+Bwd combined
 
 | seqlen | ours (ms) | warpscan (ms) | speedup |
 |-------:|----------:|--------------:|--------:|
@@ -93,9 +148,6 @@ Kernel-vs-kernel benchmark on H100 80GB, `(B=8, C=1536, seqlen)`. Direct kernel 
 | 16384 | 2.322 | 2.132 | 0.92x |
 | 32768 | 4.602 | 4.264 | 0.93x |
 | 65536 | 9.212 | 8.573 | 0.93x |
-
-<details>
-<summary>Forward-only and backward-only breakdown</summary>
 
 #### Forward-only
 
@@ -129,41 +181,103 @@ Our backward fuses the reverse scan + gate gradient computation into a single ke
 | 32768 | 2.821 | 2.687 | 0.95x |
 | 65536 | 5.623 | 5.394 | 0.96x |
 
+We match or beat warpscan on fwd+bwd at seqlen <= 2048 on H100 (Hopper). At larger sequence lengths, warpscan's hand-tuned CUDA kernel wins by ~7-10% — an inherent [Triton vs CUDA tradeoff](https://github.com/triton-lang/triton/discussions/4472) in scan operations.
+
+<details>
+<summary><b>RTX 3080 Ti 12GB</b> (Ampere)</summary>
+
+![Kernel benchmark on 3080 Ti](docs/3080_ti_kernel_benchmark.png)
+
+On Ampere, Triton and warpscan are **essentially tied** (within 1%) across all sequence lengths. The Triton compiler limitations that cause the ~7-10% gap on Hopper don't manifest on this architecture.
+
+#### Fwd+Bwd combined
+
+| seqlen | ours (ms) | warpscan (ms) | speedup |
+|-------:|----------:|--------------:|--------:|
+| 128 | 0.069 | 0.068 | 0.99x |
+| 256 | 0.130 | 0.129 | 1.00x |
+| 512 | 0.251 | 0.248 | 0.99x |
+| 1024 | 0.499 | 0.496 | 0.99x |
+| 2048 | 0.991 | 0.990 | 1.00x |
+| 4096 | 1.974 | 1.960 | 0.99x |
+| 8192 | 3.944 | 3.931 | 1.00x |
+| 16384 | 7.894 | 7.832 | 0.99x |
+| 32768 | 15.796 | 15.685 | 0.99x |
+
+#### Forward-only
+
+| seqlen | ours (ms) | warpscan (ms) | speedup |
+|-------:|----------:|--------------:|--------:|
+| 128 | 0.027 | 0.028 | **1.01x** |
+| 256 | 0.050 | 0.050 | **1.01x** |
+| 512 | 0.095 | 0.094 | 0.99x |
+| 1024 | 0.189 | 0.187 | 0.99x |
+| 2048 | 0.372 | 0.368 | 0.99x |
+| 4096 | 0.739 | 0.736 | 1.00x |
+| 8192 | 1.473 | 1.468 | 1.00x |
+| 16384 | 2.949 | 2.932 | 0.99x |
+| 32768 | 5.896 | 5.857 | 0.99x |
+| 65536 | 11.814 | 11.742 | 0.99x |
+
+#### Backward-only
+
+| seqlen | ours (ms) | warpscan (ms) | speedup |
+|-------:|----------:|--------------:|--------:|
+| 128 | 0.043 | 0.043 | **1.01x** |
+| 256 | 0.081 | 0.081 | 0.99x |
+| 512 | 0.157 | 0.156 | 1.00x |
+| 1024 | 0.311 | 0.310 | 0.99x |
+| 2048 | 0.620 | 0.620 | 1.00x |
+| 4096 | 1.237 | 1.228 | 0.99x |
+| 8192 | 2.474 | 2.452 | 0.99x |
+| 16384 | 4.951 | 4.896 | 0.99x |
+| 32768 | 9.900 | 9.824 | 0.99x |
+
+*Note: Backward/fwd+bwd benchmarks cap at seqlen=32768 due to 12GB VRAM (6 tensors needed for backward pass).*
+
 </details>
 
-**Summary**: We match or beat warpscan on fwd+bwd at seqlen <= 2048 (the common training regime). At larger sequence lengths, warpscan's hand-tuned CUDA kernel wins by ~7-10% — an inherent [Triton vs CUDA tradeoff](https://github.com/triton-lang/triton/discussions/4472) in scan operations.
+### When to use which
 
-### Why use this over warpscan?
+[accelerated-scan](https://github.com/proger/accelerated-scan) (warpscan) is an excellent hand-tuned CUDA implementation. Choose based on your needs:
 
-- **Variable-length sequences**: native `cu_seqlens` packing — no padding to power-of-2, no wasted compute
-- **torch.compile**: works with `@triton_op` wrappers, warpscan is a C++ extension that breaks the compiler
-- **Bidirectional scan**: built-in, not bolted on
-- **No sequence length limit**: warpscan caps at 65536, we handle arbitrary lengths
-- **fp16/bf16 numerical stability**: multi-chunk kernels upcast to fp32 internally — warpscan accumulates in native half precision and [diverges at seqlen >= 4096](#numerical-accuracy)
-
-### When to use warpscan instead
-
-- **Forward-only inference at long sequences (seqlen >= 4096)**: warpscan's hand-tuned CUDA kernel is ~12-14% faster for forward-only passes at large sequence lengths. If you're doing inference without backward passes on fixed-length, power-of-2 sequences, warpscan is the faster choice.
-- **You don't need variable-length packing, bidirectional scans, or torch.compile**: if your use case is simple fixed-length fp32 forward passes, warpscan's raw kernel speed at large seqlens may matter more than our feature set.
+| | ours (Triton) | warpscan (CUDA) |
+|:---|:---:|:---:|
+| Raw kernel speed (H100, seqlen <= 2048) | **faster** | |
+| Raw kernel speed (H100, seqlen >= 4096) | | **~10% faster** |
+| Raw kernel speed (3080 Ti / Ampere) | **tied** | **tied** |
+| PyTorch API speed (H100, fwd+bwd, seqlen < 512) | | **faster** (lighter autograd) |
+| PyTorch API speed (H100, fwd+bwd, seqlen >= 512) | **~1-3% faster** | |
+| PyTorch API speed (3080 Ti, fwd+bwd) | **~6% faster** | |
+| Variable-length sequences | yes (`cu_seqlens`, flash-attn convention) | no (power-of-2, <= 65536) |
+| `torch.compile` | yes (`@triton_op`) | graph break (C++ extension) |
+| Bidirectional scan | yes | no |
+| fp16/bf16 long-sequence stability | fp32 accumulation | native dtype ([overflow at >= 4096](#numerical-accuracy)) |
 
 ### Numerical accuracy
 
 ![Accuracy benchmark on H100 80GB](docs/h100_accuracy_benchmark.png)
 
-RMSE vs sequential fp64 gold label (H100, C=4):
+RMSE vs sequential fp64 gold label (H100, C=4). Same seqlens across all dtypes — 128 (single-chunk), 512 (single-chunk boundary), 2048 (multi-chunk), 8192 (large multi-chunk):
 
-| dtype | seqlen | ours (RMSE) | warpscan (RMSE) | note |
-|------:|-------:|------------:|----------------:|:-----|
-| fp32 | 128 | 6.55e-08 | 7.14e-08 | both near machine epsilon |
-| fp32 | 8192 | 6.69e-08 | 6.70e-08 | both near machine epsilon |
-| fp16 | 512 | 4.89e-04 | 5.27e-04 | ours ~7% lower |
-| fp16 | 2048 | 2.58e-04 | 5.21e-04 | ours ~2x lower (fp32 accum) |
-| fp16 | 8192 | 2.58e-04 | **diverged** | warpscan produces Inf |
-| bf16 | 512 | 3.68e-03 | 3.96e-03 | ours ~7% lower |
-| bf16 | 2048 | 2.07e-03 | 3.96e-03 | ours ~2x lower (fp32 accum) |
-| bf16 | 4096 | 2.06e-03 | **diverged** | warpscan overflows to ~10^18 |
+| dtype | seqlen | ours (RMSE) | warpscan (RMSE) |
+|:------|-------:|------------:|----------------:|
+| fp32 | 128 | 6.55e-08 | 7.14e-08 |
+| fp32 | 512 | 6.46e-08 | 6.91e-08 |
+| fp32 | 2048 | 6.62e-08 | 7.07e-08 |
+| fp32 | 8192 | 6.69e-08 | 6.70e-08 |
+| fp16 | 128 | 4.51e-04 | 5.24e-04 |
+| fp16 | 512 | 4.89e-04 | 5.27e-04 |
+| fp16 | 2048 | 2.58e-04 | 5.21e-04 |
+| fp16 | 8192 | 2.58e-04 | **diverged** (Inf) |
+| bf16 | 128 | 3.59e-03 | 3.68e-03 |
+| bf16 | 512 | 3.68e-03 | 3.96e-03 |
+| bf16 | 2048 | 2.07e-03 | 3.96e-03 |
+| bf16 | 8192 | 2.06e-03 | **6.67e+18** (overflow) |
 
-Our multi-chunk pipelined kernels upcast fp16/bf16 loads to fp32 for scan accumulation, matching the fp32 prefix state. This gives consistently lower error at all sequence lengths and prevents the overflow that warpscan hits at seqlen >= 4096 in half precision.
+**fp32**: Both implementations are near machine epsilon (~6-7e-08) across all sequence lengths — no meaningful difference.
+
+**fp16/bf16**: Our multi-chunk pipelined kernels (seqlen > 512) upcast loads to fp32 for scan accumulation. Warpscan accumulates in the native dtype, which can overflow at longer sequences. See also warpscan's own [precision notes](https://github.com/proger/accelerated-scan#notes-on-precision).
 
 To run the benchmarks yourself:
 
